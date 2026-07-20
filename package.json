@@ -1,6 +1,6 @@
 {
   "name": "musicsync",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Self-hosted one-way playlist sync between Spotify and TIDAL using only official APIs. Cron-scheduled, Docker-ready, ENV-configured.",
   "type": "module",
   "license": "MIT",
