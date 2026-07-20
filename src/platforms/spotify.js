@@ -171,6 +171,34 @@ export function createSpotifyAdapter({ config, tokens, logger, fetchImpl, sleep 
       log.info('rewrote playlist', { id, count: trackIds.length });
     },
 
+    /** Set-style append for two-way sync. Spotify has no duplicate restriction. */
+    async addTracks(id, trackIds) {
+      for (const part of chunk([...new Set(trackIds)], 100)) {
+        await http.request(`${API}/playlists/${id}/items`, {
+          method: 'POST',
+          json: { uris: part.map((tid) => `spotify:track:${tid}`) },
+          auth: bearer,
+          retryAmbiguous: false, // appends are not idempotent on Spotify
+        });
+      }
+      return { absent: [] };
+    },
+
+    /**
+     * Set-style removal for two-way sync. Entries: [{id}]. Spotify's
+     * remove-by-URI deletes every occurrence of the track — correct under
+     * two-way's set semantics. Removal is idempotent, so retries stay on.
+     */
+    async removeTracks(id, entries) {
+      for (const part of chunk(entries, 100)) {
+        await http.request(`${API}/playlists/${id}/items`, {
+          method: 'DELETE',
+          json: { items: part.map((e) => ({ uri: `spotify:track:${e.id}` })) },
+          auth: bearer,
+        });
+      }
+    },
+
     async findTracksByIsrc(isrc) {
       const url = `${API}/search?q=${encodeURIComponent(`isrc:${isrc}`)}&type=track&limit=10&market=${config.spotify.market}`;
       const res = await http.request(url, { auth: bearer });

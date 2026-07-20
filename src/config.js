@@ -9,32 +9,37 @@ export class ConfigError extends Error {
 }
 
 const PLATFORMS = ['spotify', 'tidal'];
+const MODES = ['one-way', 'two-way'];
 const LOG_LEVELS = ['debug', 'info', 'warn', 'error'];
 const TIDAL_ACCESS_TYPES = ['PUBLIC', 'UNLISTED'];
 
 function parseBool(raw, name, problems, fallback) {
-  if (raw === undefined || raw === '') return fallback;
-  if (['true', '1'].includes(raw.toLowerCase())) return true;
-  if (['false', '0'].includes(raw.toLowerCase())) return false;
+  if (raw === undefined || raw === null || raw === '') return fallback;
+  if (typeof raw === 'boolean') return raw;
+  if (['true', '1'].includes(String(raw).toLowerCase())) return true;
+  if (['false', '0'].includes(String(raw).toLowerCase())) return false;
   problems.push(`${name} must be true/false (got "${raw}")`);
   return fallback;
 }
 
 function parsePlaylists(raw, problems) {
-  if (raw === undefined || raw.trim() === '') {
-    problems.push('SYNC_PLAYLISTS is required (comma-separated master playlist ids, "masterId:slaveId" pairs, or "all")');
-    return [];
+  if (raw === undefined || raw === null || raw === '') return [];
+  if (Array.isArray(raw)) {
+    // settings.json form: [{primaryId, secondaryId}]
+    return raw
+      .filter((p) => p && typeof p.primaryId === 'string' && p.primaryId)
+      .map((p) => ({ primaryId: p.primaryId, secondaryId: p.secondaryId ?? null, name: p.name ?? null }));
   }
-  if (raw.trim() === 'all') return 'all';
+  if (String(raw).trim() === 'all') return 'all';
   const pairs = [];
   const problemsBefore = problems.length;
-  for (const entry of raw.split(',').map((s) => s.trim()).filter(Boolean)) {
+  for (const entry of String(raw).split(',').map((s) => s.trim()).filter(Boolean)) {
     const parts = entry.split(':');
     if (parts.length > 2 || parts.some((p) => p === '' || /\s/.test(p))) {
-      problems.push(`SYNC_PLAYLISTS entry "${entry}" is invalid — expected "masterId" or "masterId:slaveId" with no whitespace`);
+      problems.push(`SYNC_PLAYLISTS entry "${entry}" is invalid — expected "primaryId" or "primaryId:secondaryId" with no whitespace`);
       continue;
     }
-    pairs.push({ masterId: parts[0], slaveId: parts[1] ?? null });
+    pairs.push({ primaryId: parts[0], secondaryId: parts[1] ?? null, name: null });
   }
   if (pairs.length === 0 && problems.length === problemsBefore) {
     problems.push('SYNC_PLAYLISTS contained no valid entries');
@@ -42,33 +47,53 @@ function parsePlaylists(raw, problems) {
   return pairs;
 }
 
+const pick = (...values) => values.find((v) => v !== undefined && v !== null && v !== '');
+
 /**
- * Parse and validate all configuration from environment variables.
- * Reports every problem at once via ConfigError.
+ * Build configuration from ENV seeded defaults merged with panel-managed
+ * settings.json (settings win for app settings; bootstrap vars are ENV-only).
+ *
+ * Malformed values throw ConfigError. MISSING values do not throw — they are
+ * reported in `config.incomplete` so the web panel can run its setup wizard;
+ * headless callers decide whether incomplete is fatal.
  */
-export function loadConfig(env = process.env) {
+export function loadConfig(env = process.env, settings = {}) {
   const problems = [];
+  const incomplete = [];
+  const s = settings ?? {};
 
-  for (const name of ['SPOTIFY_CLIENT_ID', 'SPOTIFY_CLIENT_SECRET', 'TIDAL_CLIENT_ID', 'TIDAL_CLIENT_SECRET']) {
-    if (!env[name]) problems.push(`${name} is required`);
+  const spotifyClientId = pick(s.spotify?.clientId, env.SPOTIFY_CLIENT_ID) ?? '';
+  const spotifyClientSecret = pick(s.spotify?.clientSecret, env.SPOTIFY_CLIENT_SECRET) ?? '';
+  const tidalClientId = pick(s.tidal?.clientId, env.TIDAL_CLIENT_ID) ?? '';
+  const tidalClientSecret = pick(s.tidal?.clientSecret, env.TIDAL_CLIENT_SECRET) ?? '';
+  if (!spotifyClientId) incomplete.push('Spotify client id');
+  if (!spotifyClientSecret) incomplete.push('Spotify client secret');
+  if (!tidalClientId) incomplete.push('TIDAL client id');
+  if (!tidalClientSecret) incomplete.push('TIDAL client secret');
+
+  const mode = pick(s.sync?.mode, env.SYNC_MODE) ?? 'one-way';
+  if (!MODES.includes(mode)) problems.push(`SYNC_MODE must be one of ${MODES.join('|')} (got "${mode}")`);
+
+  const sourceRaw = pick(s.sync?.source, env.SYNC_SOURCE) ?? null;
+  if (sourceRaw && !PLATFORMS.includes(sourceRaw)) {
+    problems.push(`SYNC_SOURCE must be one of ${PLATFORMS.join('|')} (got "${sourceRaw}")`);
   }
+  if (mode === 'one-way' && !sourceRaw) incomplete.push('sync source platform (SYNC_SOURCE)');
+  // two-way has no source; pairs are just linked playlists
+  const source = mode === 'one-way' ? sourceRaw : null;
 
-  const master = env.SYNC_MASTER ?? '';
-  if (!PLATFORMS.includes(master)) {
-    problems.push(`SYNC_MASTER must be one of ${PLATFORMS.join('|')} (got "${master}")`);
-  }
+  const pairs = parsePlaylists(pick(s.sync?.pairs, env.SYNC_PLAYLISTS), problems);
+  if (pairs !== 'all' && pairs.length === 0) incomplete.push('playlist selection (SYNC_PLAYLISTS)');
 
-  const pairs = parsePlaylists(env.SYNC_PLAYLISTS, problems);
-
-  const cron = env.SYNC_CRON ?? '0 */6 * * *';
+  const cron = pick(s.sync?.cron, env.SYNC_CRON) ?? '0 */6 * * *';
   if (!validateCron(cron)) problems.push(`SYNC_CRON "${cron}" is not a valid cron expression`);
 
-  const logLevel = env.LOG_LEVEL ?? 'info';
-  if (!LOG_LEVELS.includes(logLevel)) {
-    problems.push(`LOG_LEVEL must be one of ${LOG_LEVELS.join('|')} (got "${logLevel}")`);
-  }
+  const periodic = parseBool(pick(s.sync?.periodic, env.SYNC_PERIODIC), 'SYNC_PERIODIC', problems, true);
 
-  const accessType = env.TIDAL_ACCESS_TYPE ?? 'UNLISTED';
+  const logLevel = pick(s.logLevel, env.LOG_LEVEL) ?? 'info';
+  if (!LOG_LEVELS.includes(logLevel)) problems.push(`LOG_LEVEL must be one of ${LOG_LEVELS.join('|')} (got "${logLevel}")`);
+
+  const accessType = pick(s.tidal?.accessType, env.TIDAL_ACCESS_TYPE) ?? 'UNLISTED';
   if (!TIDAL_ACCESS_TYPES.includes(accessType)) {
     problems.push(`TIDAL_ACCESS_TYPE must be one of ${TIDAL_ACCESS_TYPES.join('|')} (got "${accessType}") — TIDAL has no PRIVATE playlists`);
   }
@@ -78,40 +103,54 @@ export function loadConfig(env = process.env) {
     problems.push(`AUTH_PORT must be an integer between 1 and 65535 (got "${env.AUTH_PORT}")`);
   }
 
-  const matchRetryRuns = Number(env.MATCH_RETRY_RUNS ?? '10');
+  const panelPort = Number(env.PORT ?? '8080');
+  if (!Number.isInteger(panelPort) || panelPort < 1 || panelPort > 65535) {
+    problems.push(`PORT must be an integer between 1 and 65535 (got "${env.PORT}")`);
+  }
+
+  const matchRetryRuns = Number(pick(s.sync?.matchRetryRuns, env.MATCH_RETRY_RUNS) ?? '10');
   if (!Number.isInteger(matchRetryRuns) || matchRetryRuns < 1) {
     problems.push(`MATCH_RETRY_RUNS must be a positive integer (got "${env.MATCH_RETRY_RUNS}")`);
   }
 
+  const bypassAuth = parseBool(env.WEB_PANEL_BYPASS_AUTH, 'WEB_PANEL_BYPASS_AUTH', problems, false);
+  const password = env.WEB_PANEL_PASSWORD || null;
+
   const config = {
     spotify: {
-      clientId: env.SPOTIFY_CLIENT_ID ?? '',
-      clientSecret: env.SPOTIFY_CLIENT_SECRET ?? '',
-      market: env.SPOTIFY_MARKET ?? 'US',
-      playlistPublic: parseBool(env.SPOTIFY_PLAYLIST_PUBLIC, 'SPOTIFY_PLAYLIST_PUBLIC', problems, false),
+      clientId: spotifyClientId,
+      clientSecret: spotifyClientSecret,
+      market: pick(s.spotify?.market, env.SPOTIFY_MARKET) ?? 'US',
+      playlistPublic: parseBool(pick(s.spotify?.playlistPublic, env.SPOTIFY_PLAYLIST_PUBLIC), 'SPOTIFY_PLAYLIST_PUBLIC', problems, false),
     },
     tidal: {
-      clientId: env.TIDAL_CLIENT_ID ?? '',
-      clientSecret: env.TIDAL_CLIENT_SECRET ?? '',
+      clientId: tidalClientId,
+      clientSecret: tidalClientSecret,
       accessType,
     },
     sync: {
-      master,
-      slave: master === 'spotify' ? 'tidal' : 'spotify',
+      mode,
+      source,
       pairs,
+      periodic,
       cron,
-      onStart: parseBool(env.SYNC_ON_START, 'SYNC_ON_START', problems, true),
-      tz: env.SYNC_TZ,
-      dryRun: parseBool(env.DRY_RUN, 'DRY_RUN', problems, false),
+      onStart: parseBool(pick(s.sync?.onStart, env.SYNC_ON_START), 'SYNC_ON_START', problems, true),
+      tz: pick(s.sync?.tz, env.SYNC_TZ),
+      dryRun: parseBool(pick(s.sync?.dryRun, env.DRY_RUN), 'DRY_RUN', problems, false),
       matchRetryRuns,
+    },
+    panel: {
+      enabled: Boolean(password || bypassAuth),
+      port: panelPort,
+      password,
+      bypassAuth,
+      bind: env.PANEL_BIND ?? '127.0.0.1',
     },
     configDir: env.CONFIG_DIR ?? '/config',
     authPort,
-    // 127.0.0.1 keeps the temporary OAuth callback server off the LAN when
-    // running natively; the Dockerfile sets AUTH_BIND=0.0.0.0 so the
-    // published container port stays reachable.
     authBind: env.AUTH_BIND ?? '127.0.0.1',
     logLevel,
+    incomplete,
   };
 
   if (problems.length > 0) throw new ConfigError(problems);

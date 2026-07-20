@@ -1,65 +1,101 @@
 import { AuthRequiredError } from './http.js';
 import { computeWriteStrategy } from './diff.js';
+import { computeTwoWayOps } from './twoway.js';
+
+const other = (platform) => (platform === 'spotify' ? 'tidal' : 'spotify');
+const playlistField = (platform) => `${platform}PlaylistId`;
+const tokenField = (platform) => `${platform}ChangeToken`;
 
 /**
- * One-way sync engine, direction-agnostic: `master` and `slave` are platform
- * adapters. The slave playlist is fully tool-owned — manual edits to it are
- * overwritten. A failure in one pair never stops the others; AuthRequiredError
- * propagates so the service can enter its re-auth state.
+ * Sync engine over both platform adapters.
+ *
+ * one-way: the source platform's playlist is the truth; the mirror playlist
+ * on the other platform is fully tool-owned (order preserved, edits there
+ * are overwritten).
+ *
+ * two-way: linked playlists; adds/removals propagate both ways with set
+ * semantics against a persisted baseline (see twoway.js). No ordering
+ * guarantees; each platform keeps its own arrangement.
+ *
+ * A failure in one pair never stops the others; AuthRequiredError propagates
+ * so the service can enter its re-auth state.
  */
-export function createSyncEngine({ config, master, slave, state, matcher, logger }) {
+export function createSyncEngine({ config, adapters, state, matcher, logger }) {
   const log = logger.child('sync');
+  const syncable = (t) => !t.isLocal && !t.isVideo;
+
+  // The "primary" platform is where configured playlist ids live:
+  // the source in one-way mode, Spotify in two-way mode.
+  const primaryPlatform = config.sync.mode === 'one-way' ? config.sync.source : 'spotify';
 
   async function resolvePairs() {
     if (config.sync.pairs !== 'all') return config.sync.pairs;
-    const all = await master.listOwnPlaylists();
-    return all.map((p) => ({ masterId: p.id, slaveId: null }));
+    const all = await adapters[primaryPlatform].listOwnPlaylists();
+    return all.map((p) => ({ primaryId: p.id, secondaryId: null, name: p.name }));
   }
 
-  async function syncPair({ masterId, slaveId }, unmatchedAll) {
-    const pairState = (state.data.pairs[masterId] ??= {});
-    if (slaveId) pairState.slavePlaylistId = slaveId;
+  function pairState(primaryId, secondaryId) {
+    const ps = (state.data.pairs[primaryId] ??= {});
+    ps[playlistField(primaryPlatform)] = primaryId;
+    if (secondaryId) ps[playlistField(other(primaryPlatform))] = secondaryId;
+    return ps;
+  }
 
-    const masterMeta = await master.getPlaylistMeta(masterId);
+  function finishPair(ps, name, result) {
+    ps.name = name;
+    ps.lastResult = { ...result, at: new Date().toISOString() };
+    return result;
+  }
+
+  // ---------------------------------------------------------------- one-way
+  async function syncPairOneWay({ primaryId, secondaryId }, unmatchedAll) {
+    const sourcePlatform = config.sync.source;
+    const mirrorPlatform = other(sourcePlatform);
+    const source = adapters[sourcePlatform];
+    const mirror = adapters[mirrorPlatform];
+    const ps = pairState(primaryId, secondaryId);
+
+    const sourceMeta = await source.getPlaylistMeta(primaryId);
 
     let created = false;
-    if (!pairState.slavePlaylistId) {
+    if (!ps[playlistField(mirrorPlatform)]) {
       if (config.sync.dryRun) {
-        log.info('[dry-run] would create slave playlist', { masterId, name: masterMeta.name });
-        return { masterId, slaveId: null, status: 'dry-run', matched: 0, unmatched: 0 };
+        log.info('[dry-run] would create mirror playlist', { primaryId, name: sourceMeta.name });
+        return finishPair(ps, sourceMeta.name, { status: 'dry-run', matched: 0, total: 0, unmatched: 0 });
       }
-      const newPlaylist = await slave.createPlaylist({
-        name: masterMeta.name,
-        description: `Synced from ${config.sync.master} by musicsync — do not edit; changes are overwritten.`,
+      const newPlaylist = await mirror.createPlaylist({
+        name: sourceMeta.name,
+        description: `Synced from ${sourcePlatform} by musicsync — do not edit; changes are overwritten.`,
       });
-      pairState.slavePlaylistId = newPlaylist.id;
+      ps[playlistField(mirrorPlatform)] = newPlaylist.id;
       created = true;
-      log.info('created slave playlist', { masterId, slaveId: newPlaylist.id, name: masterMeta.name });
+      log.info('created mirror playlist', { primaryId, mirrorId: newPlaylist.id, name: sourceMeta.name });
     }
+    const mirrorId = ps[playlistField(mirrorPlatform)];
 
-    const slaveMeta = created ? null : await slave.getPlaylistMeta(pairState.slavePlaylistId);
+    const mirrorMeta = created ? null : await mirror.getPlaylistMeta(mirrorId);
     const unchanged = !created
-      && pairState.masterChangeToken === masterMeta.changeToken
-      && pairState.slaveChangeToken === slaveMeta.changeToken;
+      && ps[tokenField(sourcePlatform)] === sourceMeta.changeToken
+      && ps[tokenField(mirrorPlatform)] === mirrorMeta.changeToken;
     // Re-attempt pairs with unmatched tracks so newly-added catalog entries
     // can resolve old misses (matcher's failure cache paces the API cost).
-    if (unchanged && (pairState.unmatchedCount ?? 0) === 0) {
-      log.debug('unchanged, skipping', { masterId });
-      return { masterId, slaveId: pairState.slavePlaylistId, status: 'skipped', matched: 0, unmatched: 0 };
+    if (unchanged && (ps.unmatchedCount ?? 0) === 0) {
+      log.debug('unchanged, skipping', { primaryId });
+      return { status: 'skipped' };
     }
 
-    // Local files (no ISRC, not addable via API) and videos cannot sync.
-    const masterItems = (await master.getPlaylistItems(masterId)).filter((t) => !t.isLocal && !t.isVideo);
+    const sourceItems = (await source.getPlaylistItems(primaryId)).filter(syncable);
     const target = [];
     const unmatched = [];
-    for (const track of masterItems) {
-      const result = await matcher.matchTrack(config.sync.master, track);
-      if (result.slaveTrackId) {
-        target.push(result.slaveTrackId);
+    for (const track of sourceItems) {
+      const result = await matcher.matchTrack(track, sourcePlatform, mirrorPlatform);
+      if (result.matchedId) {
+        target.push(result.matchedId);
       } else {
         unmatched.push({
-          playlist: masterMeta.name,
-          masterTrackId: track.id,
+          playlist: sourceMeta.name,
+          platform: sourcePlatform,
+          trackId: track.id,
           title: track.title,
           artists: track.artists,
           isrc: track.isrc,
@@ -68,63 +104,203 @@ export function createSyncEngine({ config, master, slave, state, matcher, logger
       }
     }
 
-    const currentItems = created ? [] : await slave.getPlaylistItems(pairState.slavePlaylistId);
+    const currentItems = created ? [] : await mirror.getPlaylistItems(mirrorId);
 
     if (config.sync.dryRun) {
       const strategy = computeWriteStrategy(target, currentItems.map((t) => t.id));
       log.info('[dry-run] diff computed', {
-        masterId, slaveId: pairState.slavePlaylistId,
-        strategy: strategy.type, targetLength: target.length, currentLength: currentItems.length,
-        unmatched: unmatched.length,
+        primaryId, mirrorId, strategy: strategy.type,
+        targetLength: target.length, currentLength: currentItems.length, unmatched: unmatched.length,
       });
+      unmatchedAll.push(...unmatched);
+      return finishPair(ps, sourceMeta.name, {
+        status: 'dry-run', matched: target.length, total: sourceItems.length, unmatched: unmatched.length,
+      });
+    }
+
+    const writeResult = await mirror.setPlaylistItems(mirrorId, target, currentItems);
+    if ((writeResult?.dropped ?? 0) > 0) {
+      // Partial write: leave the change tokens stale so the next run
+      // re-diffs and repairs instead of short-circuiting over the loss.
+      log.warn('write incomplete — will re-attempt next run', { primaryId, mirrorId, dropped: writeResult.dropped });
     } else {
-      const writeResult = await slave.setPlaylistItems(pairState.slavePlaylistId, target, currentItems);
-      if ((writeResult?.dropped ?? 0) > 0) {
-        // Partial write: leave the change tokens stale so the next run
-        // re-diffs and repairs instead of short-circuiting over the loss.
-        log.warn('write incomplete — will re-attempt next run', {
-          masterId, slaveId: pairState.slavePlaylistId, dropped: writeResult.dropped,
-        });
-      } else {
-        pairState.masterChangeToken = masterMeta.changeToken;
-        pairState.slaveChangeToken = (await slave.getPlaylistMeta(pairState.slavePlaylistId)).changeToken;
-        pairState.unmatchedCount = unmatched.length;
-        pairState.lastSyncedAt = new Date().toISOString();
-      }
+      ps[tokenField(sourcePlatform)] = sourceMeta.changeToken;
+      ps[tokenField(mirrorPlatform)] = (await mirror.getPlaylistMeta(mirrorId)).changeToken;
+      ps.unmatchedCount = unmatched.length;
+      ps.lastSyncedAt = new Date().toISOString();
     }
 
     unmatchedAll.push(...unmatched);
     log.info('pair synced', {
-      masterId, slaveId: pairState.slavePlaylistId,
-      tracks: masterItems.length, matched: target.length, unmatched: unmatched.length,
-      dryRun: config.sync.dryRun || undefined,
+      primaryId, mirrorId, tracks: sourceItems.length, matched: target.length, unmatched: unmatched.length,
     });
-    return {
-      masterId, slaveId: pairState.slavePlaylistId,
-      status: config.sync.dryRun ? 'dry-run' : 'synced',
-      matched: target.length, unmatched: unmatched.length,
-    };
+    return finishPair(ps, sourceMeta.name, {
+      status: 'synced', matched: target.length, total: sourceItems.length, unmatched: unmatched.length,
+    });
   }
 
+  // ---------------------------------------------------------------- two-way
+  async function matchNewTracks({ ids, byId, fromPlatform, presentOnTarget, coveredOnTarget, pairs, adds, unmatched, playlistName }) {
+    const toPlatform = other(fromPlatform);
+    for (const id of ids) {
+      const track = byId.get(id);
+      const result = await matcher.matchTrack(track, fromPlatform, toPlatform);
+      if (!result.matchedId) {
+        unmatched.push({
+          playlist: playlistName, platform: fromPlatform, trackId: id,
+          title: track.title, artists: track.artists, isrc: track.isrc, reason: result.reason,
+        });
+        continue;
+      }
+      if (coveredOnTarget.has(result.matchedId)) continue; // pair already formed from the other side
+      coveredOnTarget.add(result.matchedId);
+      const pair = fromPlatform === 'spotify'
+        ? { spotify: id, tidal: result.matchedId }
+        : { spotify: result.matchedId, tidal: id };
+      if (presentOnTarget.has(result.matchedId)) {
+        pairs.push(pair); // both sides already have it
+      } else {
+        adds.push(pair);
+      }
+    }
+  }
+
+  async function syncPairTwoWay({ primaryId, secondaryId }, unmatchedAll) {
+    const { spotify, tidal } = adapters;
+    const ps = pairState(primaryId, secondaryId); // primary = spotify in two-way
+
+    const spotifyMeta = await spotify.getPlaylistMeta(ps.spotifyPlaylistId);
+
+    if (!ps.tidalPlaylistId) {
+      if (config.sync.dryRun) {
+        log.info('[dry-run] would create linked tidal playlist', { primaryId, name: spotifyMeta.name });
+        return finishPair(ps, spotifyMeta.name, { status: 'dry-run', matched: 0, total: 0, unmatched: 0 });
+      }
+      const created = await tidal.createPlaylist({
+        name: spotifyMeta.name,
+        description: 'Linked with Spotify by musicsync (two-way).',
+      });
+      ps.tidalPlaylistId = created.id;
+      log.info('created linked tidal playlist', { primaryId, tidalId: created.id, name: spotifyMeta.name });
+    }
+
+    const tidalMeta = await tidal.getPlaylistMeta(ps.tidalPlaylistId);
+    const unchanged = ps.spotifyChangeToken === spotifyMeta.changeToken
+      && ps.tidalChangeToken === tidalMeta.changeToken;
+    if (unchanged && (ps.unmatchedCount ?? 0) === 0 && ps.baseline) {
+      log.debug('unchanged, skipping', { primaryId });
+      return { status: 'skipped' };
+    }
+
+    const spotifyItems = (await spotify.getPlaylistItems(ps.spotifyPlaylistId)).filter(syncable);
+    const tidalItems = (await tidal.getPlaylistItems(ps.tidalPlaylistId)).filter(syncable);
+    const spotifyById = new Map(spotifyItems.map((t) => [t.id, t]));
+    const tidalById = new Map(tidalItems.map((t) => [t.id, t]));
+    const spotifyIds = [...spotifyById.keys()];
+    const tidalIds = [...tidalById.keys()];
+
+    const ops = computeTwoWayOps({ baseline: ps.baseline ?? [], spotifyIds, tidalIds });
+    const firstRun = !ps.baseline;
+    // First run has no baseline: merge only — everything is "new", nothing
+    // is removed.
+    const removeFromSpotify = firstRun ? [] : ops.removeFromSpotify;
+    const removeFromTidal = firstRun ? [] : ops.removeFromTidal;
+
+    const pairs = [...ops.keep];
+    const addPairsToTidal = [];
+    const addPairsToSpotify = [];
+    const unmatched = [];
+    const coveredTidal = new Set(pairs.map((p) => p.tidal));
+    const coveredSpotify = new Set(pairs.map((p) => p.spotify));
+
+    await matchNewTracks({
+      ids: ops.newOnSpotify, byId: spotifyById, fromPlatform: 'spotify',
+      presentOnTarget: new Set(tidalIds), coveredOnTarget: coveredTidal,
+      pairs, adds: addPairsToTidal, unmatched, playlistName: spotifyMeta.name,
+    });
+    await matchNewTracks({
+      ids: ops.newOnTidal.filter((id) => !coveredTidal.has(id)), byId: tidalById, fromPlatform: 'tidal',
+      presentOnTarget: new Set(spotifyIds), coveredOnTarget: coveredSpotify,
+      pairs, adds: addPairsToSpotify, unmatched, playlistName: spotifyMeta.name,
+    });
+
+    if (config.sync.dryRun) {
+      log.info('[dry-run] two-way plan', {
+        primaryId, addToTidal: addPairsToTidal.length, addToSpotify: addPairsToSpotify.length,
+        removeFromSpotify: removeFromSpotify.length, removeFromTidal: removeFromTidal.length,
+        unmatched: unmatched.length, firstRun,
+      });
+      unmatchedAll.push(...unmatched);
+      return finishPair(ps, spotifyMeta.name, {
+        status: 'dry-run', matched: pairs.length, total: pairs.length + unmatched.length, unmatched: unmatched.length,
+      });
+    }
+
+    if (removeFromSpotify.length > 0) {
+      await spotify.removeTracks(ps.spotifyPlaylistId, removeFromSpotify.map((p) => ({ id: p.spotify })));
+      log.info('removed from spotify (removed on tidal)', { primaryId, count: removeFromSpotify.length });
+    }
+    if (removeFromTidal.length > 0) {
+      await tidal.removeTracks(
+        ps.tidalPlaylistId,
+        removeFromTidal.map((p) => ({ id: p.tidal, itemId: tidalById.get(p.tidal)?.itemId })),
+      );
+      log.info('removed from tidal (removed on spotify)', { primaryId, count: removeFromTidal.length });
+    }
+    if (addPairsToTidal.length > 0) {
+      const { absent } = await tidal.addTracks(ps.tidalPlaylistId, addPairsToTidal.map((p) => p.tidal));
+      const absentSet = new Set(absent);
+      // Only pairs whose add actually landed enter the baseline — a pair
+      // recorded without its track present would read as a removal next run.
+      pairs.push(...addPairsToTidal.filter((p) => !absentSet.has(p.tidal)));
+      log.info('added to tidal', { primaryId, count: addPairsToTidal.length - absent.length, dropped: absent.length || undefined });
+    }
+    if (addPairsToSpotify.length > 0) {
+      await spotify.addTracks(ps.spotifyPlaylistId, addPairsToSpotify.map((p) => p.spotify));
+      pairs.push(...addPairsToSpotify);
+      log.info('added to spotify', { primaryId, count: addPairsToSpotify.length });
+    }
+
+    ps.baseline = pairs;
+    ps.spotifyChangeToken = (await spotify.getPlaylistMeta(ps.spotifyPlaylistId)).changeToken;
+    ps.tidalChangeToken = (await tidal.getPlaylistMeta(ps.tidalPlaylistId)).changeToken;
+    ps.unmatchedCount = unmatched.length;
+    ps.lastSyncedAt = new Date().toISOString();
+
+    unmatchedAll.push(...unmatched);
+    log.info('pair synced (two-way)', {
+      primaryId, tidalId: ps.tidalPlaylistId, inSync: pairs.length,
+      addedToTidal: addPairsToTidal.length, addedToSpotify: addPairsToSpotify.length,
+      removed: removeFromSpotify.length + removeFromTidal.length, unmatched: unmatched.length,
+    });
+    return finishPair(ps, spotifyMeta.name, {
+      status: 'synced', matched: pairs.length, total: pairs.length + unmatched.length, unmatched: unmatched.length,
+    });
+  }
+
+  // ------------------------------------------------------------------- run
   return {
     async runSync() {
       state.data.runCount += 1;
+      const syncPair = config.sync.mode === 'two-way' ? syncPairTwoWay : syncPairOneWay;
       const pairs = await resolvePairs();
       const results = [];
       const unmatchedAll = [];
       for (const pair of pairs) {
         try {
-          results.push(await syncPair(pair, unmatchedAll));
+          results.push({ primaryId: pair.primaryId, ...(await syncPair(pair, unmatchedAll)) });
         } catch (err) {
           if (err instanceof AuthRequiredError) throw err;
-          log.error('pair failed', { masterId: pair.masterId, error: String(err) });
-          results.push({ masterId: pair.masterId, status: 'failed', error: String(err) });
+          log.error('pair failed', { primaryId: pair.primaryId, error: String(err) });
+          const ps = state.data.pairs[pair.primaryId];
+          if (ps) ps.lastResult = { status: 'failed', error: String(err), at: new Date().toISOString() };
+          results.push({ primaryId: pair.primaryId, status: 'failed', error: String(err) });
         }
         state.save();
       }
       state.writeUnmatchedReport(unmatchedAll);
       const counts = results.reduce((acc, r) => ((acc[r.status] = (acc[r.status] ?? 0) + 1), acc), {});
-      log.info('run complete', { run: state.data.runCount, pairs: results.length, ...counts, unmatched: unmatchedAll.length });
+      log.info('run complete', { run: state.data.runCount, mode: config.sync.mode, pairs: results.length, ...counts, unmatched: unmatchedAll.length });
       return { pairs: results, unmatchedTotal: unmatchedAll.length };
     },
   };

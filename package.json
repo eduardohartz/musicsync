@@ -29,6 +29,7 @@
     "isrc"
   ],
   "dependencies": {
+    "express": "^5.2.1",
     "node-cron": "^4.6.0"
   }
 }

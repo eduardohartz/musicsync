@@ -57,10 +57,13 @@ export const baseConfig = {
   spotify: { clientId: 'scid', clientSecret: 'ssec', market: 'DE', playlistPublic: false },
   tidal: { clientId: 'tcid', clientSecret: 'tsec', accessType: 'UNLISTED' },
   sync: {
-    master: 'spotify', slave: 'tidal', pairs: [], cron: '0 */6 * * *',
+    mode: 'one-way', source: 'spotify', pairs: [], periodic: true, cron: '0 */6 * * *',
     onStart: true, tz: undefined, dryRun: false, matchRetryRuns: 10,
   },
+  panel: { enabled: false, port: 8080, password: null, bypassAuth: false, bind: '127.0.0.1' },
   configDir: '/tmp/unused',
   authPort: 8888,
+  authBind: '127.0.0.1',
   logLevel: 'error',
+  incomplete: [],
 };
