@@ -1,0 +1,34 @@
+{
+  "name": "musicsync",
+  "version": "0.1.0",
+  "description": "Self-hosted one-way playlist sync between Spotify and TIDAL using only official APIs. Cron-scheduled, Docker-ready, ENV-configured.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.9"
+  },
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/index.js",
+    "auth": "node --env-file-if-exists=.env src/cli.js auth",
+    "sync": "node --env-file-if-exists=.env src/cli.js sync-once",
+    "status": "node --env-file-if-exists=.env src/cli.js status",
+    "test": "node --test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OWNER/musicsync.git"
+  },
+  "keywords": [
+    "spotify",
+    "tidal",
+    "playlist",
+    "sync",
+    "self-hosted",
+    "docker",
+    "isrc"
+  ],
+  "dependencies": {
+    "node-cron": "^4.6.0"
+  }
+}
