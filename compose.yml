@@ -6,11 +6,11 @@ services:
     restart: unless-stopped
     init: true
     env_file: .env
+    ports:
+      # Web panel (setup wizard, dashboard, OAuth callbacks). Bound to the
+      # host loopback — put a reverse proxy in front for remote access.
+      - "127.0.0.1:8080:8080"
     volumes:
       # Create ./config before first run (mkdir -p config); on Linux hosts
       # chown it to uid 1000 so the container's non-root user can write it.
       - ./config:/config
-    # The one-time OAuth bootstrap needs the callback port published on the
-    # host loopback. Run:
-    #   docker compose run --rm -p 127.0.0.1:8888:8888 musicsync auth
-    # The long-running service itself needs no ports.

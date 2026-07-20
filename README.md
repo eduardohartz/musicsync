@@ -1,137 +1,107 @@
-# musicsync
+<p align="center">
+  <img src="assets/logo.svg" width="84" alt="musicsync logo">
+</p>
 
-**Self-hosted, one-way playlist sync between Spotify and TIDAL — using only the official APIs.**
+<h1 align="center">musicsync</h1>
 
-Pick a *master* platform (your source of truth); musicsync mirrors its playlists to the *slave* platform on a cron schedule. Runs headless in Docker, configured entirely through environment variables.
+<p align="center"><b>Self-hosted playlist sync between Spotify and TIDAL — one-way mirrors or full two-way sync, using only the official APIs.</b></p>
 
-To our knowledge this is the first Spotify↔TIDAL sync tool built purely on the official **Spotify Web API** (2026 Development-Mode endpoints) and the official **TIDAL API v2** (`openapi.tidal.com`) — no reverse-engineered endpoints, no embedded borrowed client ids.
+Runs headless in Docker with a small web panel: a first-launch **setup wizard** walks you through connecting both accounts, picking playlists, and choosing a schedule (or none — manual-only syncing is a first-class mode). To our knowledge this is the first Spotify↔TIDAL sync tool built purely on the official **Spotify Web API** (2026 Development-Mode endpoints) and the official **TIDAL API v2** — no reverse-engineered endpoints, no borrowed client ids.
 
 ## Features
 
-- **One-way master → slave sync** in either direction (`SYNC_MASTER=spotify` or `tidal`)
+- **Two sync modes**
+  - *One-way mirror*: a source playlist is the truth; musicsync keeps an exact, ordered copy on the other platform.
+  - *Two-way sync*: add or remove a track on either platform and it propagates to the other. Track sets stay equal; each platform keeps its own ordering.
+- **Web panel** — setup wizard, dashboard (connection status, per-playlist `synced / total` counts, unmatched-track report, sync-now button), and live-applied settings. Password-protected (`WEB_PANEL_PASSWORD`) or explicitly open (`WEB_PANEL_BYPASS_AUTH=true`).
 - **ISRC-first track matching** with a metadata fallback (duration ±2 s + normalized title + artist overlap) and hard version guards (a *remix/instrumental/acapella* never matches the plain recording)
-- Sync **all owned playlists** or an explicit list; mirrors are auto-created or pinned to existing playlists
-- **Cron-scheduled** (`node-cron`, overlap-safe), with immediate sync on start
+- **Cron-scheduled or manual-only** — periodic sync is optional
 - **Idempotent & resumable**: persisted match cache, change-token short-circuits, TIDAL `Idempotency-Key` mutations, atomic state writes
-- **Unmatched report** (`config/unmatched.json`) — a missing match never fails a run; misses are retried every `MATCH_RETRY_RUNS` runs
-- **Manual overrides** (`config/overrides.json`) to pin stubborn tracks
-- **Dry-run mode**, structured logs, Docker `HEALTHCHECK`
-- Tiny footprint: one runtime dependency (`node-cron`), native `fetch`, plain JSON state
+- Unmatched tracks never fail a run — they're reported in the panel and retried as catalogs change
+- Runs fine without the panel too: full ENV configuration + CLI (`musicsync auth`, `sync-once`, `status`)
 
-## Setup
-
-### 1. Register your own API apps (one time, ~10 minutes)
-
-**Spotify** — [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard)
-> ⚠️ Spotify's 2026 Development-Mode rules: the app **owner must have an active Premium subscription**, you get **one app** per developer, and up to **5 authorized users**. Personal, non-commercial use is exactly what Development Mode is for.
-
-1. Create an app; add redirect URI `http://127.0.0.1:8888/callback/spotify` (the literal IP — Spotify rejects `localhost`).
-2. Copy the Client ID and Client Secret.
-
-**TIDAL** — [developer.tidal.com/dashboard](https://developer.tidal.com/dashboard) (any TIDAL account)
-
-1. Create an app; add redirect URI `http://127.0.0.1:8888/callback/tidal`.
-2. In the app's settings enable scopes **`playlists.read`, `playlists.write`, `user.read`**.
-3. Copy the Client ID and Client Secret.
-
-### 2. Configure
+## Quickstart
 
 ```bash
 git clone https://github.com/OWNER/musicsync && cd musicsync
-cp .env.example .env
-# fill in the four credentials + SYNC_MASTER + SYNC_PLAYLISTS
-mkdir -p config
-```
-
-> On a Linux host, make `./config` writable for the container's non-root user (uid 1000): `sudo chown 1000:1000 config`. (Docker Desktop on macOS/Windows handles this automatically.)
-
-### 3. Authorize (one time)
-
-```bash
-docker compose build
-docker compose run --rm -p 127.0.0.1:8888:8888 musicsync auth
-```
-
-Open the printed URL(s), approve access, done — tokens land in `./config/tokens.json` (mode 600) and survive container recreation.
-
-Running on a remote server where your browser can't reach the container? Use `musicsync auth --manual`: open the URLs anywhere, then paste the full `http://127.0.0.1:8888/...` redirect URL from your browser's address bar back into the terminal.
-
-> This first `auth` run also doubles as a smoke test that TIDAL accepted your app for user-level scopes (the platform is still in beta — see Limitations).
-
-### 4. Run
-
-```bash
+cp .env.example .env        # set WEB_PANEL_PASSWORD (one line — that's the only required config)
+mkdir -p config             # Linux hosts: sudo chown 1000:1000 config
 docker compose up -d
-docker compose logs -f          # watch the first sync
 ```
 
-Without Docker (Node ≥ 22.9): set `CONFIG_DIR=./config` in `.env` (uncomment the line), then `npm ci && npm run auth && npm start` — the npm scripts load `.env` via Node's `--env-file`.
+Open **http://127.0.0.1:8080** and follow the setup wizard:
 
-### Useful commands
+1. **Credentials** — create a (free) app on each platform; the wizard shows the exact redirect URIs to paste into their dashboards. Spotify requires the app owner to have Premium; TIDAL needs the `playlists.read`, `playlists.write`, `user.read` scopes enabled.
+2. **Connect** — approve access on both platforms (OAuth runs through the panel; there's a paste-the-URL fallback for remote servers).
+3. **Mode** — one-way mirror (pick the direction) or two-way sync.
+4. **Playlists** — everything the account owns, or hand-picked.
+5. **Schedule** — presets, custom cron, or *manual only*; optionally run the first sync immediately.
 
-```bash
-docker compose run --rm musicsync status      # auth state, pair state, cache sizes
-docker compose run --rm musicsync sync-once   # single sync, then exit
-cat config/unmatched.json                     # tracks that couldn't be matched
-```
+Done. The dashboard shows every playlist with its `synced / total` count and anything that couldn't be matched.
 
-## Configuration reference
+Running without Docker (Node ≥ 22.9): set `CONFIG_DIR=./config` in `.env`, then `npm ci && npm start` — the npm scripts load `.env` automatically.
 
-| Variable | Default | Description |
-|---|---|---|
-| `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | — | Your Spotify app credentials |
-| `TIDAL_CLIENT_ID` / `TIDAL_CLIENT_SECRET` | — | Your TIDAL app credentials |
-| `SYNC_MASTER` | — | `spotify` \| `tidal` — the source of truth |
-| `SYNC_PLAYLISTS` | — | `all`, or comma-separated master playlist ids; `masterId:slaveId` pins an existing mirror |
-| `SYNC_CRON` | `0 */6 * * *` | Sync schedule (cron) |
-| `SYNC_ON_START` | `true` | Sync immediately when the service starts |
-| `SYNC_TZ` | system | Timezone for the cron expression |
-| `SPOTIFY_MARKET` | `US` | Market for Spotify search |
-| `TIDAL_ACCESS_TYPE` | `UNLISTED` | Created TIDAL playlists: `PUBLIC` \| `UNLISTED` |
-| `SPOTIFY_PLAYLIST_PUBLIC` | `false` | Created Spotify playlists public? |
-| `DRY_RUN` | `false` | Log the diff, write nothing |
-| `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
-| `MATCH_RETRY_RUNS` | `10` | Retry unmatched tracks every N runs |
-| `CONFIG_DIR` | `/config` | Tokens, state, reports (volume-mount this) |
-| `AUTH_PORT` | `8888` | Loopback port for the one-time OAuth bootstrap |
-| `AUTH_BIND` | `127.0.0.1` | Bind address for the bootstrap callback server (the Docker image sets `0.0.0.0` so the published port works) |
+## How the two modes behave
 
-### Manual match overrides
+**One-way mirror** (`SYNC_MODE=one-way`): the mirror playlist belongs to the tool — order is kept identical to the source, and any manual edits on the mirror side are overwritten on the next run.
 
-Create `config/overrides.json` mapping a master track id to the slave track id you want:
-
-```json
-{ "4uLU6hMCjMI75M1A2tKUQC": "251380837" }
-```
+**Two-way sync** (`SYNC_MODE=two-way`): both playlists are yours to edit. After the first run establishes the link (a union merge — nothing is deleted), each subsequent run compares both sides against the last synced state: new tracks are added to the other platform, removed tracks are removed from the other platform. Removal wins over "untouched" (per-item edit timestamps don't exist on either API). Sets stay equal; ordering is per-platform; duplicates collapse (TIDAL playlists can't hold the same track twice).
 
 ## How matching works
 
-1. **ISRC lookup** on the slave platform (the recording industry's identifier, exposed by both APIs). Multiple hits are filtered by version guards and resolved deterministically (closest duration, then stable id order).
-2. **Metadata fallback**: search by album+artist, then track+artist; accept only when duration is within 2 s **and** normalized titles include one another **and** at least one artist matches. Normalization is script-aware (accent-folding for Latin, untouched CJK).
-3. **No match** → the track is skipped, recorded in `config/unmatched.json`, and retried every `MATCH_RETRY_RUNS` runs (catalogs change). The playlist still syncs.
+1. **ISRC lookup** (the recording industry's identifier, exposed by both APIs). A single hit is authoritative; multiple hits are filtered by version guards and resolved deterministically (closest duration, then stable id order).
+2. **Metadata fallback**: search album+artist, then track+artist; accept only when duration is within 2 s **and** normalized titles include one another **and** at least one artist matches. Normalization is script-aware (accent-folding for Latin, untouched CJK).
+3. **No match** → the track stays where it is, appears in the panel's unmatched list, and is retried every `MATCH_RETRY_RUNS` runs. Manual overrides: `config/overrides.json` maps a track id to the id you want (`{ "4uLU6hMCjMI75M1A2tKUQC": "251380837" }`).
+
+## Configuration reference
+
+Everything is optional except the panel credential — the wizard writes your choices to `config/settings.json`, which **overrides ENV** for app settings. ENV is still fully supported for headless/GitOps setups (see `.env.example` for the complete annotated list).
+
+| Variable | Default | Description |
+|---|---|---|
+| `WEB_PANEL_PASSWORD` | — | Enables the panel with password login |
+| `WEB_PANEL_BYPASS_AUTH` | `false` | Enables the panel **without authentication** — trusted networks only |
+| `PORT` | `8080` | Panel port (OAuth redirect URIs use it) |
+| `SPOTIFY_CLIENT_ID/SECRET`, `TIDAL_CLIENT_ID/SECRET` | — | Platform app credentials (or enter in the wizard) |
+| `SYNC_MODE` | `one-way` | `one-way` \| `two-way` |
+| `SYNC_SOURCE` | — | One-way only: `spotify` \| `tidal` — the source of truth |
+| `SYNC_PLAYLISTS` | — | `all`, or comma-separated playlist ids; `primaryId:secondaryId` links existing pairs |
+| `SYNC_PERIODIC` | `true` | `false` = manual-only syncing |
+| `SYNC_CRON` | `0 */6 * * *` | Schedule when periodic |
+| `SYNC_ON_START` / `SYNC_TZ` / `DRY_RUN` / `LOG_LEVEL` / `MATCH_RETRY_RUNS` | | See `.env.example` |
+| `SPOTIFY_MARKET` / `TIDAL_ACCESS_TYPE` / `SPOTIFY_PLAYLIST_PUBLIC` | | See `.env.example` |
+| `CONFIG_DIR` | `/config` | Tokens, settings, state, reports (volume-mount this) |
+| `AUTH_PORT` / `AUTH_BIND` / `PANEL_BIND` | `8888` / loopback | Headless CLI auth + bind addresses (Docker image binds `0.0.0.0`) |
 
 ## Limitations (read this once)
 
-- **The mirror playlist belongs to the tool.** Manual edits on the slave side are overwritten on the next sync.
-- **Spotify re-authorization every ≤ 6 months.** Spotify refresh tokens hard-expire 6 months after consent (platform rule, for every app). musicsync warns in the logs from day ~150, and if the token dies the service goes `unhealthy` and logs exactly what to run — it never crash-loops or deletes anything.
-- **Spotify Premium is required** for the app owner (Development Mode rule since Feb 2026).
-- **Only playlists you own or collaborate on** can be a Spotify master (Development Mode restriction; followed/editorial playlists are unreadable).
-- **TIDAL's public API is beta.** Rate limits are undocumented (musicsync throttles itself to ~1 req/s and honors `Retry-After`); a fresh TIDAL app being denied user scopes has been reported occasionally — the `auth` step will tell you immediately.
-- **TIDAL has no private playlists** — mirrors there are `UNLISTED` (default) or `PUBLIC`.
-- **TIDAL playlists can't contain the same track twice**, so a master playlist with duplicates syncs to TIDAL with each track once (first position wins).
-- **Spotify local files** can't be synced (no ISRC, not addable via API); they're reported as unmatched.
-- Initial syncs of large libraries are deliberately slow (both platforms removed/never had batch reads; expect ~1 request/second against TIDAL).
+- **Spotify re-authorization every ≤ 6 months** — Spotify refresh tokens hard-expire 6 months after consent (platform rule for every app). The panel shows a countdown and the service goes `unhealthy` with clear instructions when it lapses; nothing is lost.
+- **Spotify Premium is required** for the app owner, and only playlists you own or collaborate on can be read (2026 Development-Mode rules).
+- **TIDAL's public API is beta** — undocumented rate limits (musicsync throttles to ~1 req/s and honors `Retry-After`); occasional reports of new client ids lacking user scopes — the wizard's connect step surfaces this immediately.
+- **TIDAL has no private playlists** (created mirrors are `UNLISTED` by default) and **can't hold duplicate tracks** (duplicates collapse when syncing to TIDAL).
+- **Two-way sync is set-based**: ordering isn't reconciled across platforms, and a track removed on one side while untouched on the other is treated as a removal.
+- **Spotify local files** can't sync (no ISRC, not addable via API); TIDAL **videos** are left in place but never propagated.
+- Initial syncs of large libraries are deliberately slow (~1 request/second against TIDAL; Spotify batch endpoints no longer exist).
+- The panel binds to the host loopback by default. For remote access, use an SSH tunnel or put an authenticating reverse proxy (HTTPS) in front.
+
+## CLI (headless installs)
+
+```bash
+docker compose run --rm musicsync status       # auth + sync state as JSON
+docker compose run --rm musicsync sync-once    # single run, then exit
+docker compose run --rm -p 127.0.0.1:8888:8888 musicsync auth   # OAuth without the panel
+```
 
 ## Development
 
 ```bash
 npm ci
-npm test        # node:test, no test dependencies
+npm test        # node:test — no test dependencies
 ```
 
-Design docs live in `docs/`: [API research](docs/research/api-research.md) (live-verified endpoint tables for both platforms, July 2026), [design spec](docs/superpowers/specs/2026-07-20-musicsync-design.md), [implementation plan](docs/superpowers/plans/2026-07-20-musicsync.md).
+Design docs live in `docs/`: [API research](docs/research/api-research.md) (live-verified endpoint tables for both platforms), [v0.1 design](docs/superpowers/specs/2026-07-20-musicsync-design.md), [v0.2 design (panel + two-way)](docs/superpowers/specs/2026-07-20-web-panel-two-way-design.md).
 
-Contributions welcome — please keep the zero-dependency spirit (native `fetch`, `node:test`) and update the research doc when platform behavior changes.
+Contributions welcome — runtime dependencies are deliberately minimal (`node-cron`, `express`), the frontend is no-build vanilla JS, and platform behavior changes should update the research doc.
 
 ## License
 

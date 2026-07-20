@@ -1,9 +1,10 @@
-# musicsync — one-way Spotify↔TIDAL playlist sync
+# musicsync — Spotify↔TIDAL playlist sync (one-way or two-way)
 FROM node:24-alpine
 
 ENV NODE_ENV=production \
     CONFIG_DIR=/config \
-    AUTH_BIND=0.0.0.0
+    AUTH_BIND=0.0.0.0 \
+    PANEL_BIND=0.0.0.0
 
 WORKDIR /app
 
@@ -17,6 +18,8 @@ RUN mkdir -p /config && chown node:node /config
 VOLUME /config
 
 USER node
+
+EXPOSE 8080
 
 HEALTHCHECK --interval=5m --timeout=10s --start-period=30s \
   CMD node healthcheck.js
