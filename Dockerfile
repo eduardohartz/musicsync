@@ -18,8 +18,6 @@ VOLUME /config
 
 USER node
 
-EXPOSE 8080
-
 HEALTHCHECK --interval=5m --timeout=10s --start-period=30s \
   CMD node healthcheck.js
 

@@ -7,10 +7,7 @@ services:
     init: true
     env_file: .env
     ports:
-      # Web panel (setup wizard, dashboard, OAuth callbacks). Bound to the
-      # host loopback — put a reverse proxy in front for remote access.
-      - "127.0.0.1:8080:8080"
+      # Web panel (setup wizard, dashboard, OAuth callbacks).
+      - "${PORT:-8080}:${PORT:-8080}"
     volumes:
-      # Create ./config before first run (mkdir -p config); on Linux hosts
-      # chown it to uid 1000 so the container's non-root user can write it.
       - ./config:/config
