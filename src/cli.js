@@ -1,17 +1,34 @@
 #!/usr/bin/env node
-import { buildContext, main } from './index.js';
+import { createRuntime, main } from './index.js';
+import { ConfigError } from './config.js';
 import { runAuthBootstrap } from './auth/bootstrap.js';
 
-const USAGE = `musicsync — one-way Spotify↔TIDAL playlist sync
+const USAGE = `musicsync — playlist sync between Spotify and TIDAL
 
 Usage:
-  musicsync                 start the scheduled sync service
-  musicsync auth            one-time interactive OAuth bootstrap
+  musicsync                 start the service (scheduled sync + web panel)
+  musicsync auth            headless OAuth bootstrap on the AUTH_PORT loopback
       --manual              paste redirect URLs instead of a local callback server
       --force               re-authorize even if tokens exist
   musicsync sync-once       run a single sync and exit
   musicsync status          show auth and sync state
+
+The web panel (set WEB_PANEL_PASSWORD or WEB_PANEL_BYPASS_AUTH=true, open
+http://127.0.0.1:$PORT) is the primary way to set up and operate musicsync;
+these commands cover headless installs.
 `;
+
+function runtimeOrExit() {
+  try {
+    return createRuntime();
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      process.stderr.write(`${err.message}\n`);
+      process.exit(1);
+    }
+    throw err;
+  }
+}
 
 async function run() {
   const [cmd, ...flags] = process.argv.slice(2);
@@ -21,9 +38,17 @@ async function run() {
       return main();
 
     case 'auth': {
-      const { config, logger, tokens, adapters } = buildContext();
+      const runtime = runtimeOrExit();
+      const config = runtime.config();
+      if (config.incomplete.some((i) => i.includes('client'))) {
+        process.stderr.write(`Cannot authorize yet — missing: ${config.incomplete.join(', ')}\n`);
+        process.exit(1);
+      }
       const completed = await runAuthBootstrap({
-        config, tokens, adapters, logger,
+        config,
+        tokens: runtime.tokens,
+        adapters: runtime.adapters(),
+        logger: runtime.logger,
         manual: flags.includes('--manual'),
         force: flags.includes('--force'),
       });
@@ -34,31 +59,20 @@ async function run() {
     }
 
     case 'sync-once': {
-      const { engine, tokens, logger } = buildContext();
-      const log = logger.child('cli');
-      for (const svc of ['spotify', 'tidal']) {
-        if (!tokens.get(svc)?.refreshToken) {
-          log.error(`${svc} is not authorized — run "musicsync auth" first`);
-          process.exit(1);
-        }
+      const runtime = runtimeOrExit();
+      if (!runtime.ready()) {
+        const config = runtime.config();
+        process.stderr.write(`Cannot sync: ${config.incomplete.join(', ') || 'accounts not connected (run "musicsync auth" or use the web panel)'}\n`);
+        process.exit(1);
       }
-      const summary = await engine.runSync();
+      const summary = await runtime.engine().runSync();
       process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
       return undefined;
     }
 
     case 'status': {
-      const { adapters, state, tokens } = buildContext();
-      const status = {
-        spotify: adapters.spotify.describeAuth(),
-        tidal: adapters.tidal.describeAuth(),
-        tokensFile: tokens.file,
-        runCount: state.data.runCount,
-        pairs: state.data.pairs,
-        cachedMappings: Object.keys(state.data.mappings).length,
-        unmatchedCached: Object.keys(state.data.failures).length,
-      };
-      process.stdout.write(`${JSON.stringify(status, null, 2)}\n`);
+      const runtime = runtimeOrExit();
+      process.stdout.write(`${JSON.stringify(runtime.overview(), null, 2)}\n`);
       return undefined;
     }
 

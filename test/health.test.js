@@ -45,3 +45,10 @@ test('writeHealth/readHealth round-trip', () => {
   writeHealth(dir, { status: 'OK', lastOkAt: 'x' });
   assert.deepEqual(readHealth(dir), { status: 'OK', lastOkAt: 'x' });
 });
+
+test('SETUP phase and manual-only mode are healthy', () => {
+  assert.equal(evaluateHealth({ status: 'SETUP' }, now).healthy, true);
+  assert.equal(evaluateHealth({
+    status: 'OK', periodic: false, lastOkAt: new Date(now - 90 * 24 * 3600_000).toISOString(),
+  }, now).healthy, true, 'staleness is meaningless without periodic sync');
+});

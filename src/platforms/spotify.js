@@ -95,7 +95,7 @@ export function createSpotifyAdapter({ config, tokens, logger, fetchImpl, sleep 
       const out = [];
       for await (const page of pages(`${API}/me/playlists?limit=50`)) {
         for (const p of page.items ?? []) {
-          if (p?.owner?.id === userId) out.push({ id: p.id, name: p.name });
+          if (p?.owner?.id === userId) out.push({ id: p.id, name: p.name, count: p.tracks?.total ?? null });
         }
       }
       return out;

@@ -246,7 +246,9 @@ export function createTidalAdapter({ config, tokens, logger, fetchImpl, sleep })
     async listOwnPlaylists() {
       const out = [];
       for await (const page of pages(`${API}/playlists?filter[owners.id]=me`, userBearer)) {
-        for (const p of page.data ?? []) out.push({ id: p.id, name: p.attributes?.name });
+        for (const p of page.data ?? []) {
+          out.push({ id: p.id, name: p.attributes?.name, count: p.attributes?.numberOfItems ?? null });
+        }
       }
       return out;
     },

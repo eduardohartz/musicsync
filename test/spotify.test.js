@@ -130,7 +130,7 @@ test('listOwnPlaylists filters to owned playlists', async () => {
       ] } },
     },
   ]);
-  assert.deepEqual(await adapter.listOwnPlaylists(), [{ id: 'mine', name: 'Mine' }]);
+  assert.deepEqual(await adapter.listOwnPlaylists(), [{ id: 'mine', name: 'Mine', count: null }]);
 });
 
 test('findTracksByIsrc searches with isrc filter, market, limit 10', async () => {
