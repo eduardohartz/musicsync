@@ -5,14 +5,14 @@
   "type": "module",
   "license": "MIT",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.9"
   },
   "main": "src/index.js",
   "scripts": {
-    "start": "node src/index.js",
-    "auth": "node src/cli.js auth",
-    "sync": "node src/cli.js sync-once",
-    "status": "node src/cli.js status",
+    "start": "node --env-file-if-exists=.env src/index.js",
+    "auth": "node --env-file-if-exists=.env src/cli.js auth",
+    "sync": "node --env-file-if-exists=.env src/cli.js sync-once",
+    "status": "node --env-file-if-exists=.env src/cli.js status",
     "test": "node --test"
   },
   "repository": {

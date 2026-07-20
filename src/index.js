@@ -66,6 +66,12 @@ export async function main() {
   };
 
   async function runOnce(trigger) {
+    // cron's noOverlap only covers cron-triggered executions; this guard also
+    // protects the startup run from a cron tick landing while it's running.
+    if (inFlight) {
+      log.warn(`previous sync still in progress, skipping ${trigger} trigger`);
+      return;
+    }
     if (authRequired) {
       if (tokensMtime() === tokensMtimeAtAuthError) {
         log.error('sync suspended: authorization expired — run "musicsync auth", then the next tick resumes automatically');

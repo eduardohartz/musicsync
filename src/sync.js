@@ -48,7 +48,8 @@ export function createSyncEngine({ config, master, slave, state, matcher, logger
       return { masterId, slaveId: pairState.slavePlaylistId, status: 'skipped', matched: 0, unmatched: 0 };
     }
 
-    const masterItems = (await master.getPlaylistItems(masterId)).filter((t) => !t.isLocal);
+    // Local files (no ISRC, not addable via API) and videos cannot sync.
+    const masterItems = (await master.getPlaylistItems(masterId)).filter((t) => !t.isLocal && !t.isVideo);
     const target = [];
     const unmatched = [];
     for (const track of masterItems) {
@@ -77,11 +78,19 @@ export function createSyncEngine({ config, master, slave, state, matcher, logger
         unmatched: unmatched.length,
       });
     } else {
-      await slave.setPlaylistItems(pairState.slavePlaylistId, target, currentItems);
-      pairState.masterChangeToken = masterMeta.changeToken;
-      pairState.slaveChangeToken = (await slave.getPlaylistMeta(pairState.slavePlaylistId)).changeToken;
-      pairState.unmatchedCount = unmatched.length;
-      pairState.lastSyncedAt = new Date().toISOString();
+      const writeResult = await slave.setPlaylistItems(pairState.slavePlaylistId, target, currentItems);
+      if ((writeResult?.dropped ?? 0) > 0) {
+        // Partial write: leave the change tokens stale so the next run
+        // re-diffs and repairs instead of short-circuiting over the loss.
+        log.warn('write incomplete — will re-attempt next run', {
+          masterId, slaveId: pairState.slavePlaylistId, dropped: writeResult.dropped,
+        });
+      } else {
+        pairState.masterChangeToken = masterMeta.changeToken;
+        pairState.slaveChangeToken = (await slave.getPlaylistMeta(pairState.slavePlaylistId)).changeToken;
+        pairState.unmatchedCount = unmatched.length;
+        pairState.lastSyncedAt = new Date().toISOString();
+      }
     }
 
     unmatchedAll.push(...unmatched);

@@ -103,3 +103,22 @@ test('unmatched goes to failure cache and is not retried until retryRuns elapse'
   await matcher.matchTrack('spotify', track());
   assert.equal(calls.isrc, 2, 'retried after retryRuns runs');
 });
+
+test('single ISRC candidate is authoritative even with one-sided version label', async () => {
+  const { matcher } = makeMatcher({
+    isrcResults: [{ id: 'remix-id', title: 'Song', version: 'Remix', durationMs: 200000 }],
+  });
+  assert.deepEqual(await matcher.matchTrack('spotify', track({ title: 'Song' })),
+    { slaveTrackId: 'remix-id', matchedBy: 'isrc' });
+});
+
+test('multiple all-conflicting ISRC candidates fall back to closest duration', async () => {
+  const { matcher } = makeMatcher({
+    isrcResults: [
+      { id: 'far', title: 'Song (Remix)', durationMs: 190000 },
+      { id: 'near', title: 'Song (Remix)', durationMs: 200100 },
+    ],
+  });
+  assert.deepEqual(await matcher.matchTrack('spotify', track({ title: 'Song' })),
+    { slaveTrackId: 'near', matchedBy: 'isrc' });
+});

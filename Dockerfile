@@ -2,7 +2,8 @@
 FROM node:24-alpine
 
 ENV NODE_ENV=production \
-    CONFIG_DIR=/config
+    CONFIG_DIR=/config \
+    AUTH_BIND=0.0.0.0
 
 WORKDIR /app
 

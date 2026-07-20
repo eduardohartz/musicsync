@@ -143,9 +143,10 @@ export async function runAuthBootstrap({
       server.close();
       reject(new Error(`timed out after ${Math.round(timeoutMs / 60000)} min waiting for authorization`));
     }, timeoutMs);
-    // Bind all interfaces: inside Docker the published port must be reachable,
-    // while the registered redirect URI stays http://127.0.0.1 for the browser.
-    server.listen(config.authPort, '0.0.0.0', () => {
+    // Loopback by default; inside Docker AUTH_BIND=0.0.0.0 (set in the
+    // Dockerfile) makes the published port reachable, while the registered
+    // redirect URI stays http://127.0.0.1 for the browser either way.
+    server.listen(config.authPort, config.authBind ?? '127.0.0.1', () => {
       stdout.write(`Waiting for OAuth callbacks on port ${config.authPort} `
         + `(redirect URIs use http://127.0.0.1:${config.authPort}/callback/...)\n`);
     });

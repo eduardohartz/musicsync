@@ -190,3 +190,43 @@ test('pairs=all expands to every master-owned playlist', async () => {
   assert.equal(summary.pairs.length, 2);
   assert.deepEqual(calls.created.sort(), ['slave-of-One', 'slave-of-Two']);
 });
+
+test('partial slave write (dropped>0) leaves change tokens stale for retry', async () => {
+  const { engine, state } = makeWorld({
+    pairs: [{ masterId: 'm1', slaveId: 'sl1' }],
+    masterPlaylists: { m1: { name: 'Mix', changeToken: 'v2', items: [mTrack('a')] } },
+    slaveItems: { sl1: { items: [], changeToken: 'ct-1' } },
+  });
+  const world = state; // state store from makeWorld
+  const droppingSlave = {
+    createPlaylist: async () => ({ id: 'x' }),
+    getPlaylistMeta: async (id) => ({ id, changeToken: 'ct-after' }),
+    getPlaylistItems: async () => [],
+    setPlaylistItems: async () => ({ dropped: 1 }),
+  };
+  const engine2 = createSyncEngine({
+    config: { ...baseConfig, sync: { ...baseConfig.sync, pairs: [{ masterId: 'm1', slaveId: 'sl1' }] } },
+    master: {
+      getPlaylistMeta: async () => ({ id: 'm1', name: 'Mix', changeToken: 'v2' }),
+      getPlaylistItems: async () => [mTrack('a')],
+    },
+    slave: droppingSlave,
+    state: world,
+    matcher: { matchTrack: async (p, t) => ({ slaveTrackId: `s-${t.id}`, matchedBy: 'isrc' }) },
+    logger: silentLogger,
+  });
+  await engine2.runSync();
+  assert.equal(world.data.pairs.m1.masterChangeToken, undefined, 'token must stay stale after partial write');
+  void engine;
+});
+
+test('master video items are excluded from the target', async () => {
+  const { engine, calls } = makeWorld({
+    pairs: [{ masterId: 'm1', slaveId: null }],
+    masterPlaylists: {
+      m1: { name: 'Mix', changeToken: 'v1', items: [mTrack('a'), mTrack('videos:v9', { isVideo: true }), mTrack('b')] },
+    },
+  });
+  await engine.runSync();
+  assert.deepEqual(calls.slaveWrites[0].trackIds, ['s-a', 's-b']);
+});

@@ -122,3 +122,50 @@ test('throttle spaces requests at configured rps', async () => {
   // First request consumes the single burst token; the next two must each wait ~500ms.
   assert.equal(slept.filter((ms) => ms >= 400 && ms <= 600).length, 2, `sleeps: ${slept}`);
 });
+
+test('rate limiter does not double-credit wait time (regression: 2x rate bug)', async () => {
+  let t = 0;
+  const f = mockFetch(Array.from({ length: 3 }, () => ({ status: 200, body: {} })));
+  const slept = [];
+  const http = createHttpClient({
+    platform: 'test', rps: 1, burst: 1,
+    fetchImpl: f.impl,
+    now: () => t,
+    sleep: async (ms) => { slept.push(ms); t += ms; },
+  });
+  await http.request('https://x/1');
+  await http.request('https://x/2');
+  await http.request('https://x/3');
+  const total = slept.reduce((a, b) => a + b, 0);
+  assert.ok(total >= 2000, `3 requests at 1 rps must wait ~2s total, waited ${total}ms`);
+});
+
+test('huge Retry-After is capped at 60s per wait', async () => {
+  const s = instantSleep();
+  const f = mockFetch([
+    { status: 429, headers: { 'Retry-After': '21600' } },
+    { status: 200, body: { ok: 1 } },
+  ]);
+  await client(f, s).request('https://x/y');
+  assert.ok(Math.max(...s.slept) <= 60_000, `waits were ${s.slept}`);
+});
+
+test('retryAmbiguous:false blocks 5xx/network replay but keeps 429 retry', async () => {
+  const f1 = mockFetch([{ status: 502, body: {} }]);
+  await assert.rejects(
+    () => client(f1, instantSleep()).request('https://x/y', { method: 'POST', retryAmbiguous: false }),
+    (err) => err instanceof ApiError && err.status === 502,
+  );
+  assert.equal(f1.calls.length, 1, '5xx must not be replayed');
+
+  const f2 = mockFetch([new Error('ECONNRESET')]);
+  await assert.rejects(
+    () => client(f2, instantSleep()).request('https://x/y', { method: 'POST', retryAmbiguous: false }),
+    /ECONNRESET/,
+  );
+  assert.equal(f2.calls.length, 1, 'network error must not be replayed');
+
+  const f3 = mockFetch([{ status: 429, headers: { 'Retry-After': '1' } }, { status: 201, body: {} }]);
+  await client(f3, instantSleep()).request('https://x/y', { method: 'POST', retryAmbiguous: false });
+  assert.equal(f3.calls.length, 2, '429 was rejected pre-processing, safe to retry');
+});

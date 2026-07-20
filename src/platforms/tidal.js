@@ -140,31 +140,38 @@ export function createTidalAdapter({ config, tokens, logger, fetchImpl, sleep })
     }
   }
 
-  /** Mutation with Idempotency-Key + TIDAL 409/422 semantics. */
-  async function mutate(url, { method, json }, attempt = 1) {
+  /**
+   * Mutation with Idempotency-Key + TIDAL 409 semantics. The key is minted
+   * ONCE per logical mutation and reused across every retry: a 409 /
+   * IDEMPOTENT_REQUEST_IN_PROGRESS means the same-key request is still being
+   * processed, and replaying the same key lets the server dedupe it —
+   * a fresh key would double-apply the mutation.
+   */
+  async function mutate(url, { method, json }) {
     const idempotencyKey = crypto.randomUUID();
-    try {
-      return await http.request(url, {
-        method,
-        json,
-        headers: { ...acceptHeaders, 'Content-Type': JSONAPI, 'Idempotency-Key': idempotencyKey },
-        auth: userBearer,
-      });
-    } catch (err) {
-      if (err instanceof ApiError && (err.status === 409 || err.code === 'IDEMPOTENT_REQUEST_IN_PROGRESS')) {
-        if (attempt >= 3) throw err;
-        log.warn('idempotent request in progress, retrying', { url, attempt });
-        await wait(2000);
-        return mutate(url, { method, json }, attempt + 1);
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await http.request(url, {
+          method,
+          json,
+          headers: { ...acceptHeaders, 'Content-Type': JSONAPI, 'Idempotency-Key': idempotencyKey },
+          auth: userBearer,
+        });
+      } catch (err) {
+        if (err instanceof ApiError
+          && (err.status === 409 || err.code === 'IDEMPOTENT_REQUEST_IN_PROGRESS')
+          && attempt < 3) {
+          log.warn('idempotent request in progress, replaying same key', { url, attempt });
+          await wait(2000);
+          continue;
+        }
+        throw err;
       }
-      if (err instanceof ApiError && err.status === 422
-        && ['DUPLICATE_ITEMS_IN_COLLECTION', 'TOO_MANY_ITEMS_IN_COLLECTION'].includes(err.code)) {
-        log.warn('tidal rejected chunk, continuing', { url, code: err.code });
-        return null;
-      }
-      throw err;
     }
   }
+
+  const isItemRejection = (err) => err instanceof ApiError && err.status === 422
+    && ['DUPLICATE_ITEMS_IN_COLLECTION', 'TOO_MANY_ITEMS_IN_COLLECTION'].includes(err.code);
 
   async function getCurrentUser() {
     if (!cachedUser) {
@@ -197,13 +204,33 @@ export function createTidalAdapter({ config, tokens, logger, fetchImpl, sleep })
     return refs;
   }
 
+  /**
+   * Append tracks in 50-chunks. A 422 item rejection (duplicate / playlist
+   * cap) fails the whole chunk on TIDAL's side, so fall back to per-item
+   * appends and count what was genuinely dropped — silently losing a chunk
+   * would be locked in by the engine's change-token bookkeeping.
+   */
   async function appendItems(playlistId, trackIds) {
+    const url = `${API}/playlists/${playlistId}/relationships/items`;
+    let dropped = 0;
     for (const part of chunk(trackIds, 50)) {
-      await mutate(`${API}/playlists/${playlistId}/relationships/items`, {
-        method: 'POST',
-        json: { data: part.map((id) => ({ id, type: 'tracks' })) },
-      });
+      try {
+        await mutate(url, { method: 'POST', json: { data: part.map((id) => ({ id, type: 'tracks' })) } });
+      } catch (err) {
+        if (!isItemRejection(err)) throw err;
+        log.warn('chunk rejected, retrying items individually', { playlist: playlistId, code: err.code });
+        for (const id of part) {
+          try {
+            await mutate(url, { method: 'POST', json: { data: [{ id, type: 'tracks' }] } });
+          } catch (itemErr) {
+            if (!isItemRejection(itemErr)) throw itemErr;
+            dropped += 1;
+            log.warn('item rejected by tidal', { playlist: playlistId, trackId: id, code: itemErr.code });
+          }
+        }
+      }
     }
+    return dropped;
   }
 
   return {
@@ -235,7 +262,16 @@ export function createTidalAdapter({ config, tokens, logger, fetchImpl, sleep })
       for await (const page of pages(first, userBearer)) {
         const included = indexIncluded(page.included);
         for (const entry of page.data ?? []) {
-          if (entry.type !== 'tracks') continue; // videos are not syncable
+          if (entry.type !== 'tracks') {
+            // Videos can't sync, but they must stay visible to the diff under
+            // a non-colliding pseudo-id — otherwise a hand-added video would
+            // survive forever despite the tool-owned-playlist contract.
+            out.push({
+              id: `${entry.type}:${entry.id}`, itemId: entry.meta?.itemId, isVideo: true,
+              isrc: null, title: null, version: null, artists: [], album: null, durationMs: null, isLocal: false,
+            });
+            continue;
+          }
           const resource = included.get(`tracks:${entry.id}`);
           if (!resource) {
             log.warn('playlist item missing included track resource', { playlist: id, trackId: entry.id });
@@ -261,15 +297,22 @@ export function createTidalAdapter({ config, tokens, logger, fetchImpl, sleep })
     },
 
     async setPlaylistItems(id, trackIds, currentItems) {
-      const strategy = computeWriteStrategy(trackIds, currentItems.map((t) => t.id));
+      // TIDAL playlists cannot hold the same track twice
+      // (DUPLICATE_ITEMS_IN_COLLECTION), so duplicates in the master collapse
+      // to their first occurrence here.
+      const target = [...new Set(trackIds)];
+      if (target.length < trackIds.length) {
+        log.info('collapsed duplicate tracks for tidal', { id, duplicates: trackIds.length - target.length });
+      }
+      const strategy = computeWriteStrategy(target, currentItems.map((t) => t.id));
       if (strategy.type === 'skip') {
         log.debug('playlist already in sync', { id });
-        return;
+        return { dropped: 0 };
       }
       if (strategy.type === 'append') {
-        await appendItems(id, strategy.toAppend);
-        log.info('appended tracks', { id, count: strategy.toAppend.length });
-        return;
+        const dropped = await appendItems(id, strategy.toAppend);
+        log.info('appended tracks', { id, count: strategy.toAppend.length - dropped, dropped: dropped || undefined });
+        return { dropped };
       }
       // Clear-and-rebuild keeps the playlist id stable and avoids the
       // 20-item reorder endpoint and its undocumented positionBefore
@@ -281,16 +324,22 @@ export function createTidalAdapter({ config, tokens, logger, fetchImpl, sleep })
           json: { data: part.map((r) => ({ id: r.id, type: r.type, meta: { itemId: r.itemId } })) },
         });
       }
-      await appendItems(id, trackIds);
-      log.info('rebuilt playlist', { id, removed: refs.length, added: trackIds.length });
+      const dropped = await appendItems(id, target);
+      log.info('rebuilt playlist', { id, removed: refs.length, added: target.length - dropped, dropped: dropped || undefined });
+      return { dropped };
     },
 
     async findTracksByIsrc(isrc) {
       const cc = await countryCode();
-      const url = `${API}/tracks?countryCode=${cc}&filter[isrc]=${encodeURIComponent(isrc)}&include=artists`;
-      const res = await getJson(url, catalogBearer);
-      const included = indexIncluded(res.included);
-      return (res.data ?? []).map((t) => trackFromResource(t, included));
+      const first = `${API}/tracks?countryCode=${cc}&filter[isrc]=${encodeURIComponent(isrc)}&include=artists`;
+      // A single ISRC can match many pressings, paginated — walk every page
+      // so the matcher's duration preference sees all candidates.
+      const out = [];
+      for await (const page of pages(first, catalogBearer)) {
+        const included = indexIncluded(page.included);
+        out.push(...(page.data ?? []).map((t) => trackFromResource(t, included)));
+      }
+      return out;
     },
 
     async searchTracks({ title, artist, album }) {

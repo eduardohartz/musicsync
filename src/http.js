@@ -55,7 +55,10 @@ export function createHttpClient({
     if (tokens < 1) {
       const waitMs = Math.ceil(((1 - tokens) / rps) * 1000);
       await sleep(waitMs);
+      // Credit the wait explicitly (test sleeps are instant) and reset the
+      // refill clock so real elapsed time is not counted a second time.
       tokens = Math.min(capacity, tokens + (waitMs / 1000) * rps);
+      lastRefill = now();
     }
     tokens -= 1;
   }
@@ -84,6 +87,11 @@ export function createHttpClient({
     form,
     auth,
     maxAttempts = 5,
+    // false for non-idempotent calls with no server-side dedupe (Spotify
+    // POSTs): 5xx/network failures are ambiguous — the write may have
+    // committed — so they must not be replayed. 429 (never processed) and
+    // rate-limit 403s stay retryable.
+    retryAmbiguous = true,
   } = {}) {
     let lastError;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -105,7 +113,7 @@ export function createHttpClient({
         res = await fetchImpl(url, { method, headers: reqHeaders, body });
       } catch (err) {
         lastError = err;
-        if (attempt === maxAttempts) throw err;
+        if (!retryAmbiguous || attempt === maxAttempts) throw err;
         const backoff = Math.min(2 ** attempt, 30) * 1000 * (1 + Math.random() * 0.25);
         logger?.warn(`${platform} network error, retrying`, { url, attempt, error: String(err) });
         await sleep(backoff);
@@ -130,10 +138,13 @@ export function createHttpClient({
       });
 
       const rateLimited = res.status === 429 || (retryOn403 && res.status === 403);
-      const serverError = res.status >= 500;
+      const serverError = res.status >= 500 && retryAmbiguous;
       if ((rateLimited || serverError) && attempt < maxAttempts) {
+        // Cap honored Retry-After: hard-throttled dev-mode apps can be told
+        // to wait hours, which would wedge the whole run — better to fail
+        // the request and let the next scheduled run retry.
         const backoff = Number.isFinite(retryAfter)
-          ? retryAfter * 1000
+          ? Math.min(retryAfter * 1000, 60_000)
           : Math.min(2 ** attempt, 30) * 1000 * (1 + Math.random() * 0.25);
         logger?.warn(`${platform} ${res.status}, backing off`, { url, attempt, backoffMs: Math.round(backoff) });
         lastError = error;

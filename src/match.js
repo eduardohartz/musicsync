@@ -61,17 +61,20 @@ export function fallbackMatches(master, candidate) {
   return artistOverlap(master.artists, candidate.artists);
 }
 
+function closestByDuration(master, candidates) {
+  const delta = (c) => (c.durationMs == null || master.durationMs == null
+    ? Number.MAX_SAFE_INTEGER
+    : Math.abs(c.durationMs - master.durationMs));
+  return [...candidates].sort((x, y) => delta(x) - delta(y) || String(x.id).localeCompare(String(y.id)))[0] ?? null;
+}
+
 /**
  * Deterministic candidate selection so reruns are stable: filter version
  * conflicts, then closest duration, then lexicographically smallest id.
  */
 export function pickCandidate(master, candidates) {
   const viable = (candidates ?? []).filter((c) => !versionConflict(master, c));
-  if (viable.length === 0) return null;
-  const delta = (c) => (c.durationMs == null || master.durationMs == null
-    ? Number.MAX_SAFE_INTEGER
-    : Math.abs(c.durationMs - master.durationMs));
-  return [...viable].sort((x, y) => delta(x) - delta(y) || String(x.id).localeCompare(String(y.id)))[0];
+  return closestByDuration(master, viable);
 }
 
 /**
@@ -106,8 +109,16 @@ export function createMatcher({ slave, state, overrides = {}, logger, retryRuns 
 
       if (track.isrc) {
         const candidates = await slave.findTracksByIsrc(track.isrc);
-        const pick = pickCandidate(track, candidates);
-        if (pick) return record(pick.id, 'isrc');
+        // A lone ISRC hit is authoritative — same recording by definition,
+        // even when the platforms label versions differently (TIDAL keeps
+        // "Remix" in a separate field). Version guards only arbitrate
+        // between multiple pressings; if they exclude everything, fall back
+        // to closest-duration among the (same-recording) candidates.
+        if (candidates.length === 1) return record(candidates[0].id, 'isrc');
+        if (candidates.length > 1) {
+          const pick = pickCandidate(track, candidates) ?? closestByDuration(track, candidates);
+          if (pick) return record(pick.id, 'isrc');
+        }
       }
 
       const searched = await slave.searchTracks({

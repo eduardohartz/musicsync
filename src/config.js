@@ -27,6 +27,7 @@ function parsePlaylists(raw, problems) {
   }
   if (raw.trim() === 'all') return 'all';
   const pairs = [];
+  const problemsBefore = problems.length;
   for (const entry of raw.split(',').map((s) => s.trim()).filter(Boolean)) {
     const parts = entry.split(':');
     if (parts.length > 2 || parts.some((p) => p === '' || /\s/.test(p))) {
@@ -35,7 +36,7 @@ function parsePlaylists(raw, problems) {
     }
     pairs.push({ masterId: parts[0], slaveId: parts[1] ?? null });
   }
-  if (pairs.length === 0 && problems.length === 0) {
+  if (pairs.length === 0 && problems.length === problemsBefore) {
     problems.push('SYNC_PLAYLISTS contained no valid entries');
   }
   return pairs;
@@ -106,6 +107,10 @@ export function loadConfig(env = process.env) {
     },
     configDir: env.CONFIG_DIR ?? '/config',
     authPort,
+    // 127.0.0.1 keeps the temporary OAuth callback server off the LAN when
+    // running natively; the Dockerfile sets AUTH_BIND=0.0.0.0 so the
+    // published container port stays reachable.
+    authBind: env.AUTH_BIND ?? '127.0.0.1',
     logLevel,
   };
 

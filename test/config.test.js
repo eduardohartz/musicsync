@@ -85,3 +85,20 @@ test('bad playlist entries are rejected', () => {
     );
   }
 });
+
+test('empty-separator SYNC_PLAYLISTS is reported alongside unrelated problems', () => {
+  assert.throws(
+    () => loadConfig({ ...VALID_ENV, SPOTIFY_CLIENT_SECRET: undefined, SYNC_PLAYLISTS: ', ,' }),
+    (err) => {
+      assert.ok(err instanceof ConfigError);
+      assert.match(err.message, /SPOTIFY_CLIENT_SECRET/);
+      assert.match(err.message, /no valid entries/);
+      return true;
+    },
+  );
+});
+
+test('AUTH_BIND defaults to loopback', () => {
+  assert.equal(loadConfig(VALID_ENV).authBind, '127.0.0.1');
+  assert.equal(loadConfig({ ...VALID_ENV, AUTH_BIND: '0.0.0.0' }).authBind, '0.0.0.0');
+});

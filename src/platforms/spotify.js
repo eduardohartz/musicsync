@@ -119,10 +119,15 @@ export function createSpotifyAdapter({ config, tokens, logger, fetchImpl, sleep 
     },
 
     async createPlaylist({ name, description }) {
+      // Spotify has no idempotency mechanism: retrying an ambiguous failure
+      // could create duplicate playlists / duplicate appends, so mutating
+      // POSTs never replay 5xx/network errors (429 stays retryable — the
+      // request was rejected, not processed). The next run repairs via diff.
       const p = await http.request(`${API}/me/playlists`, {
         method: 'POST',
         json: { name, public: config.spotify.playlistPublic, description },
         auth: bearer,
+        retryAmbiguous: false,
       });
       return { id: p.id };
     },
@@ -140,6 +145,7 @@ export function createSpotifyAdapter({ config, tokens, logger, fetchImpl, sleep 
             method: 'POST',
             json: { uris: uris(part) },
             auth: bearer,
+            retryAmbiguous: false, // appends are not idempotent on Spotify
           });
         }
         log.info('appended tracks', { id, count: strategy.toAppend.length });
@@ -159,6 +165,7 @@ export function createSpotifyAdapter({ config, tokens, logger, fetchImpl, sleep 
           method: 'POST',
           json: { uris: uris(part) },
           auth: bearer,
+          retryAmbiguous: false, // appends are not idempotent on Spotify
         });
       }
       log.info('rewrote playlist', { id, count: trackIds.length });

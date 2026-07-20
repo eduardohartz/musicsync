@@ -69,7 +69,9 @@ test('getPlaylistItems walks links.next cursors and captures meta.itemId', async
     },
   ]);
   const items = await adapter.getPlaylistItems('pl1');
-  assert.deepEqual(items.map((t) => [t.id, t.itemId]), [['ta', 'item-1'], ['tb', 'item-3']]);
+  // videos surface as pseudo-items (visible to the diff), tracks as themselves
+  assert.deepEqual(items.map((t) => [t.id, t.itemId]), [['ta', 'item-1'], ['videos:vid', 'item-2'], ['tb', 'item-3']]);
+  assert.equal(items[1].isVideo, true);
   assert.equal(items[0].durationMs, 200000);
   assert.deepEqual(items[0].artists, ['Artist']);
   assert.equal(items[0].album, 'Album');
@@ -227,4 +229,106 @@ test('buildAuthorizeUrl carries PKCE challenge and scopes', () => {
   assert.equal(url.searchParams.get('code_challenge_method'), 'S256');
   assert.equal(url.searchParams.get('code_challenge'), 'chal');
   assert.match(url.searchParams.get('scope'), /playlists\.write/);
+});
+
+test('duplicate track ids are collapsed before writing (TIDAL rejects duplicates)', async () => {
+  const bodies = [];
+  const { adapter } = makeAdapter([
+    usersMe,
+    {
+      match: (u, o) => u.includes('/relationships/items') && o.method === 'POST',
+      reply: (u, o) => { bodies.push(JSON.parse(o.body).data.map((d) => d.id)); return { status: 204 }; },
+    },
+  ]);
+  const result = await adapter.setPlaylistItems('pl1', ['a', 'b', 'a', 'c', 'b'], []);
+  assert.deepEqual(bodies, [['a', 'b', 'c']]);
+  assert.deepEqual(result, { dropped: 0 });
+});
+
+test('422 chunk rejection falls back to per-item appends and reports drops', async () => {
+  const attempts = [];
+  const { adapter } = makeAdapter([
+    usersMe,
+    {
+      match: (u, o) => u.includes('/relationships/items') && o.method === 'POST',
+      reply: (u, o) => {
+        const ids = JSON.parse(o.body).data.map((d) => d.id);
+        attempts.push(ids);
+        if (ids.length > 1) {
+          return { status: 422, body: { errors: [{ code: 'DUPLICATE_ITEMS_IN_COLLECTION' }] } };
+        }
+        return ids[0] === 'poison'
+          ? { status: 422, body: { errors: [{ code: 'DUPLICATE_ITEMS_IN_COLLECTION' }] } }
+          : { status: 204 };
+      },
+    },
+  ]);
+  const result = await adapter.setPlaylistItems('pl1', ['x', 'poison', 'y'], []);
+  assert.deepEqual(result, { dropped: 1 });
+  assert.deepEqual(attempts, [['x', 'poison', 'y'], ['x'], ['poison'], ['y']]);
+});
+
+test('409 in-progress replays the SAME idempotency key', async () => {
+  const keys = [];
+  let first = true;
+  const { adapter } = makeAdapter([
+    usersMe,
+    {
+      match: (u, o) => u.includes('/relationships/items') && o.method === 'POST',
+      reply: (u, o) => {
+        keys.push(o.headers['Idempotency-Key']);
+        if (first) { first = false; return { status: 409, body: { errors: [{ code: 'IDEMPOTENT_REQUEST_IN_PROGRESS' }] } }; }
+        return { status: 204 };
+      },
+    },
+  ]);
+  await adapter.setPlaylistItems('pl1', ['a'], []);
+  assert.equal(keys.length, 2);
+  assert.equal(keys[0], keys[1], '409 retry must reuse the original Idempotency-Key');
+});
+
+test('findTracksByIsrc walks pagination', async () => {
+  const { adapter } = makeAdapter([
+    usersMe,
+    {
+      match: (u) => u.includes('/tracks?') && !u.includes('cursor=p2'),
+      reply: {
+        status: 200,
+        body: {
+          data: [tidalTrackResource('t1')], included: [artistResource, albumResource],
+          links: { next: '/tracks?filter[isrc]=X&cursor=p2' },
+        },
+      },
+    },
+    {
+      match: (u) => u.includes('cursor=p2'),
+      reply: { status: 200, body: { data: [tidalTrackResource('t2')], included: [artistResource, albumResource], links: {} } },
+    },
+  ]);
+  const found = await adapter.findTracksByIsrc('X');
+  assert.deepEqual(found.map((t) => t.id), ['t1', 't2']);
+});
+
+test('videos appear as pseudo-items so the diff can see them', async () => {
+  const { adapter } = makeAdapter([
+    usersMe,
+    {
+      match: (u, o) => u.includes('/playlists/pl1/relationships/items') && (o.method ?? 'GET') === 'GET',
+      reply: {
+        status: 200,
+        body: {
+          data: [
+            { id: 'ta', type: 'tracks', meta: { itemId: 'i1' } },
+            { id: 'v1', type: 'videos', meta: { itemId: 'i2' } },
+          ],
+          included: [tidalTrackResource('ta'), artistResource, albumResource],
+          links: {},
+        },
+      },
+    },
+  ]);
+  const items = await adapter.getPlaylistItems('pl1');
+  assert.deepEqual(items.map((t) => t.id), ['ta', 'videos:v1']);
+  assert.equal(items[1].isVideo, true);
+  assert.equal(items[1].itemId, 'i2');
 });

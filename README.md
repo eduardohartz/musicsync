@@ -40,7 +40,10 @@ To our knowledge this is the first Spotify↔TIDAL sync tool built purely on the
 git clone https://github.com/OWNER/musicsync && cd musicsync
 cp .env.example .env
 # fill in the four credentials + SYNC_MASTER + SYNC_PLAYLISTS
+mkdir -p config
 ```
+
+> On a Linux host, make `./config` writable for the container's non-root user (uid 1000): `sudo chown 1000:1000 config`. (Docker Desktop on macOS/Windows handles this automatically.)
 
 ### 3. Authorize (one time)
 
@@ -62,7 +65,7 @@ docker compose up -d
 docker compose logs -f          # watch the first sync
 ```
 
-Without Docker: `npm ci && CONFIG_DIR=./config npm run auth && CONFIG_DIR=./config npm start` (Node ≥ 22).
+Without Docker (Node ≥ 22.9): set `CONFIG_DIR=./config` in `.env` (uncomment the line), then `npm ci && npm run auth && npm start` — the npm scripts load `.env` via Node's `--env-file`.
 
 ### Useful commands
 
@@ -91,6 +94,7 @@ cat config/unmatched.json                     # tracks that couldn't be matched
 | `MATCH_RETRY_RUNS` | `10` | Retry unmatched tracks every N runs |
 | `CONFIG_DIR` | `/config` | Tokens, state, reports (volume-mount this) |
 | `AUTH_PORT` | `8888` | Loopback port for the one-time OAuth bootstrap |
+| `AUTH_BIND` | `127.0.0.1` | Bind address for the bootstrap callback server (the Docker image sets `0.0.0.0` so the published port works) |
 
 ### Manual match overrides
 
@@ -114,6 +118,7 @@ Create `config/overrides.json` mapping a master track id to the slave track id y
 - **Only playlists you own or collaborate on** can be a Spotify master (Development Mode restriction; followed/editorial playlists are unreadable).
 - **TIDAL's public API is beta.** Rate limits are undocumented (musicsync throttles itself to ~1 req/s and honors `Retry-After`); a fresh TIDAL app being denied user scopes has been reported occasionally — the `auth` step will tell you immediately.
 - **TIDAL has no private playlists** — mirrors there are `UNLISTED` (default) or `PUBLIC`.
+- **TIDAL playlists can't contain the same track twice**, so a master playlist with duplicates syncs to TIDAL with each track once (first position wins).
 - **Spotify local files** can't be synced (no ISRC, not addable via API); they're reported as unmatched.
 - Initial syncs of large libraries are deliberately slow (both platforms removed/never had batch reads; expect ~1 request/second against TIDAL).
 
