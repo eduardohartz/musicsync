@@ -62,8 +62,6 @@ export const baseConfig = {
   },
   panel: { enabled: false, port: 8080, password: null, bypassAuth: false, bind: '127.0.0.1' },
   configDir: '/tmp/unused',
-  authPort: 8888,
-  authBind: '127.0.0.1',
   logLevel: 'error',
   incomplete: [],
 };

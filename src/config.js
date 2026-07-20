@@ -51,7 +51,7 @@ const pick = (...values) => values.find((v) => v !== undefined && v !== null && 
 
 /**
  * Build configuration from ENV seeded defaults merged with panel-managed
- * settings.json (settings win for app settings; bootstrap vars are ENV-only).
+ * settings.json (settings win for app settings; panel vars are ENV-only).
  *
  * Malformed values throw ConfigError. MISSING values do not throw — they are
  * reported in `config.incomplete` so the web panel can run its setup wizard;
@@ -98,11 +98,6 @@ export function loadConfig(env = process.env, settings = {}) {
     problems.push(`TIDAL_ACCESS_TYPE must be one of ${TIDAL_ACCESS_TYPES.join('|')} (got "${accessType}") — TIDAL has no PRIVATE playlists`);
   }
 
-  const authPort = Number(env.AUTH_PORT ?? '8888');
-  if (!Number.isInteger(authPort) || authPort < 1 || authPort > 65535) {
-    problems.push(`AUTH_PORT must be an integer between 1 and 65535 (got "${env.AUTH_PORT}")`);
-  }
-
   const panelPort = Number(env.PORT ?? '8080');
   if (!Number.isInteger(panelPort) || panelPort < 1 || panelPort > 65535) {
     problems.push(`PORT must be an integer between 1 and 65535 (got "${env.PORT}")`);
@@ -147,8 +142,6 @@ export function loadConfig(env = process.env, settings = {}) {
       bind: env.PANEL_BIND ?? '127.0.0.1',
     },
     configDir: env.CONFIG_DIR ?? '/config',
-    authPort,
-    authBind: env.AUTH_BIND ?? '127.0.0.1',
     logLevel,
     incomplete,
   };

@@ -10,9 +10,6 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node --env-file-if-exists=.env src/index.js",
-    "auth": "node --env-file-if-exists=.env src/cli.js auth",
-    "sync": "node --env-file-if-exists=.env src/cli.js sync-once",
-    "status": "node --env-file-if-exists=.env src/cli.js status",
     "test": "node --test"
   },
   "repository": {

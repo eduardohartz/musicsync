@@ -26,8 +26,6 @@ test('valid env parses with defaults and pair syntax', () => {
   assert.equal(cfg.spotify.market, 'US');
   assert.equal(cfg.tidal.accessType, 'UNLISTED');
   assert.equal(cfg.configDir, '/config');
-  assert.equal(cfg.authPort, 8888);
-  assert.equal(cfg.authBind, '127.0.0.1');
   assert.equal(cfg.logLevel, 'info');
   assert.deepEqual(cfg.incomplete, []);
   assert.equal(cfg.panel.enabled, false);
@@ -122,9 +120,7 @@ test('panel enablement follows password or bypass', () => {
   assert.equal(bypass.panel.bypassAuth, true);
 });
 
-test('AUTH_BIND and PANEL_BIND default to loopback', () => {
-  const cfg = loadConfig(VALID_ENV);
-  assert.equal(cfg.authBind, '127.0.0.1');
-  assert.equal(cfg.panel.bind, '127.0.0.1');
+test('PANEL_BIND defaults to loopback', () => {
+  assert.equal(loadConfig(VALID_ENV).panel.bind, '127.0.0.1');
   assert.equal(loadConfig({ ...VALID_ENV, PANEL_BIND: '0.0.0.0' }).panel.bind, '0.0.0.0');
 });

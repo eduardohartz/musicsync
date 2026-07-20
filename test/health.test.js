@@ -12,7 +12,7 @@ test('missing heartbeat is unhealthy', () => {
 test('AUTH_REQUIRED is unhealthy with actionable reason', () => {
   const result = evaluateHealth({ status: 'AUTH_REQUIRED' }, now);
   assert.equal(result.healthy, false);
-  assert.match(result.reason, /musicsync auth/);
+  assert.match(result.reason, /web panel/);
 });
 
 test('fresh OK heartbeat is healthy', () => {

@@ -23,7 +23,7 @@ export function readHealth(configDir) {
 export function evaluateHealth(data, now = Date.now()) {
   if (!data) return { healthy: false, reason: 'no heartbeat yet' };
   if (data.status === 'AUTH_REQUIRED') {
-    return { healthy: false, reason: 'authorization required — reconnect in the web panel (or run "musicsync auth")' };
+    return { healthy: false, reason: 'authorization required — reconnect the account in the web panel' };
   }
   // Waiting for first-run setup in the web panel: the container is doing its job.
   if (data.status === 'SETUP') return { healthy: true };

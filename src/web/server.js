@@ -22,7 +22,7 @@ function parseCookies(header = '') {
 
 /**
  * Web panel: dashboard, settings, first-run setup wizard, and the primary
- * OAuth callback flow (replacing the :8888 CLI bootstrap for panel users).
+ * OAuth callback flow.
  *
  * Runs only when WEB_PANEL_PASSWORD is set or WEB_PANEL_BYPASS_AUTH=true.
  * The runtime object (src/index.js) owns config/adapters/engine and is

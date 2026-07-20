@@ -253,7 +253,7 @@ export function createSpotifyAdapter({ config, tokens, logger, fetchImpl, sleep 
       };
     },
 
-    // --- auth bootstrap helpers ---
+    // --- OAuth helpers (used by the web panel) ---
     buildAuthorizeUrl({ redirectUri, state }) {
       const params = new URLSearchParams({
         client_id: config.spotify.clientId,

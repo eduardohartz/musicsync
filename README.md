@@ -18,7 +18,6 @@ Runs headless in Docker with a small web panel: a first-launch **setup wizard** 
 - **Cron-scheduled or manual-only** — periodic sync is optional
 - **Idempotent & resumable**: persisted match cache, change-token short-circuits, TIDAL `Idempotency-Key` mutations, atomic state writes
 - Unmatched tracks never fail a run — they're reported in the panel and retried as catalogs change
-- Runs fine without the panel too: full ENV configuration + CLI (`musicsync auth`, `sync-once`, `status`)
 
 ## Quickstart
 
@@ -53,9 +52,11 @@ Running without Docker (Node ≥ 22.9): set `CONFIG_DIR=./config` in `.env`, the
 2. **Metadata fallback**: search album+artist, then track+artist; accept only when duration is within 2 s **and** normalized titles include one another **and** at least one artist matches. Normalization is script-aware (accent-folding for Latin, untouched CJK).
 3. **No match** → the track stays where it is, appears in the panel's unmatched list, and is retried every `MATCH_RETRY_RUNS` runs. Manual overrides: `config/overrides.json` maps a track id to the id you want (`{ "4uLU6hMCjMI75M1A2tKUQC": "251380837" }`).
 
+If the service starts without `WEB_PANEL_PASSWORD` or `WEB_PANEL_BYPASS_AUTH`, it exits immediately — the panel is the only way to set up and operate musicsync.
+
 ## Configuration reference
 
-Everything is optional except the panel credential — the wizard writes your choices to `config/settings.json`, which **overrides ENV** for app settings. ENV is still fully supported for headless/GitOps setups (see `.env.example` for the complete annotated list).
+Everything is optional except the panel credential — setup happens in the web panel, which writes your choices to `config/settings.json`. ENV values (see `.env.example`) merely seed initial values for pre-provisioned deploys; panel settings override them.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -71,7 +72,7 @@ Everything is optional except the panel credential — the wizard writes your ch
 | `SYNC_ON_START` / `SYNC_TZ` / `DRY_RUN` / `LOG_LEVEL` / `MATCH_RETRY_RUNS` | | See `.env.example` |
 | `SPOTIFY_MARKET` / `TIDAL_ACCESS_TYPE` / `SPOTIFY_PLAYLIST_PUBLIC` | | See `.env.example` |
 | `CONFIG_DIR` | `/config` | Tokens, settings, state, reports (volume-mount this) |
-| `AUTH_PORT` / `AUTH_BIND` / `PANEL_BIND` | `8888` / loopback | Headless CLI auth + bind addresses (Docker image binds `0.0.0.0`) |
+| `PANEL_BIND` | `127.0.0.1` | Panel bind address (Docker image binds `0.0.0.0`) |
 
 ## Limitations (read this once)
 
@@ -83,14 +84,6 @@ Everything is optional except the panel credential — the wizard writes your ch
 - **Spotify local files** can't sync (no ISRC, not addable via API); TIDAL **videos** are left in place but never propagated.
 - Initial syncs of large libraries are deliberately slow (~1 request/second against TIDAL; Spotify batch endpoints no longer exist).
 - The panel binds to the host loopback by default. For remote access, use an SSH tunnel or put an authenticating reverse proxy (HTTPS) in front.
-
-## CLI (headless installs)
-
-```bash
-docker compose run --rm musicsync status       # auth + sync state as JSON
-docker compose run --rm musicsync sync-once    # single run, then exit
-docker compose run --rm -p 127.0.0.1:8888:8888 musicsync auth   # OAuth without the panel
-```
 
 ## Development
 

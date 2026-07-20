@@ -396,7 +396,7 @@ export function createTidalAdapter({ config, tokens, logger, fetchImpl, sleep })
       return { authorized: true, authorizedAt: stored.authorizedAt ?? null, daysLeft: null, warn: false };
     },
 
-    // --- auth bootstrap helpers ---
+    // --- OAuth helpers (used by the web panel) ---
     buildAuthorizeUrl({ redirectUri, state, challenge }) {
       const params = new URLSearchParams({
         response_type: 'code',

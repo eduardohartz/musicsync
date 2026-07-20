@@ -124,7 +124,7 @@ export function createRuntime({ env = process.env } = {}) {
     }
     if (authRequired) {
       if (tokensMtime() === tokensMtimeAtAuthError) {
-        log.error('sync suspended: authorization expired — reconnect in the web panel or run "musicsync auth"');
+        log.error('sync suspended: authorization expired — reconnect the account in the web panel');
         return;
       }
       authRequired = false; // tokens changed on disk; try again
@@ -295,28 +295,24 @@ export async function main() {
   }
   const config = runtime.config();
   const log = runtime.logger.child('service');
-  log.info(`musicsync v${VERSION} starting`, { mode: config.sync.mode, panel: config.panel.enabled });
 
-  let webServer = null;
-  if (config.panel.enabled) {
-    const { createWebServer } = await import('./web/server.js');
-    webServer = createWebServer({ runtime, logger: runtime.logger }).start();
+  // The web panel IS the product surface — no panel, no service.
+  if (!config.panel.enabled) {
+    process.stderr.write('musicsync requires the web panel: set WEB_PANEL_PASSWORD (or WEB_PANEL_BYPASS_AUTH=true for trusted networks) and restart.\n');
+    process.exit(1);
   }
+
+  log.info(`musicsync v${VERSION} starting`, { mode: config.sync.mode });
+  const { createWebServer } = await import('./web/server.js');
+  const webServer = createWebServer({ runtime, logger: runtime.logger }).start();
 
   if (!runtime.ready()) {
     runtime.writePhaseHealth();
-    if (config.panel.enabled) {
-      log.info(`setup needed — open the web panel at http://127.0.0.1:${config.panel.port} to finish configuration`);
-    } else {
-      log.error('configuration incomplete and the web panel is disabled.');
-      log.error(`missing: ${config.incomplete.join(', ') || 'account connections (run "musicsync auth")'}`);
-      log.error('either set WEB_PANEL_PASSWORD (or WEB_PANEL_BYPASS_AUTH=true) and use the setup panel, or provide the ENV configuration and run "musicsync auth".');
-      process.exit(1);
-    }
+    log.info(`setup needed — open the web panel at http://127.0.0.1:${config.panel.port} to finish configuration`);
   } else {
     runtime.scheduleCron();
     if (config.sync.onStart) await runtime.runOnce('startup');
-    else if (!config.sync.periodic) log.info('periodic sync is off — trigger runs from the panel or "musicsync sync-once"');
+    else if (!config.sync.periodic) log.info('periodic sync is off — trigger runs from the panel');
   }
 
   async function shutdown(signal) {
