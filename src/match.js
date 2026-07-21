@@ -78,59 +78,64 @@ export function pickCandidate(master, candidates) {
 }
 
 /**
- * Matching pipeline per master track:
+ * Matching pipeline per track, direction-explicit:
  * manual override → mapping cache → ISRC lookup → metadata fallback → failure cache.
+ * Every successful match is recorded in BOTH directions so two-way sync gets
+ * cache hits regardless of which platform a track was first seen on.
  * A miss never throws; it returns {unmatched: true, reason}.
  */
-export function createMatcher({ slave, state, overrides = {}, logger, retryRuns = 10 }) {
+export function createMatcher({ adapters, state, overrides = {}, logger, retryRuns = 10 }) {
   const log = logger.child('match');
 
   return {
-    async matchTrack(masterPlatform, track) {
-      const key = `${masterPlatform}:${track.id}`;
+    async matchTrack(track, fromPlatform, toPlatform) {
+      const key = `${fromPlatform}:${track.id}`;
 
       const overrideId = overrides[key] ?? overrides[track.id];
-      if (overrideId) return { slaveTrackId: overrideId, matchedBy: 'manual' };
+      if (overrideId) return { matchedId: overrideId, matchedBy: 'manual' };
 
       const cached = state.data.mappings[key];
-      if (cached) return { slaveTrackId: cached.slaveTrackId, matchedBy: cached.matchedBy };
+      if (cached) return { matchedId: cached.matchedId, matchedBy: cached.matchedBy };
 
       const failure = state.data.failures[key];
       if (failure && state.data.runCount - failure.failedAtRun < retryRuns) {
         return { unmatched: true, reason: failure.reason, fromFailureCache: true };
       }
 
-      const record = (slaveTrackId, matchedBy) => {
-        state.data.mappings[key] = { slaveTrackId, matchedBy, isrc: track.isrc ?? null };
+      const target = adapters[toPlatform];
+      const record = (matchedId, matchedBy, matchedIsrc) => {
+        state.data.mappings[key] = { matchedId, matchedBy, isrc: track.isrc ?? null };
+        const reverseKey = `${toPlatform}:${matchedId}`;
+        state.data.mappings[reverseKey] ??= { matchedId: track.id, matchedBy, isrc: matchedIsrc ?? track.isrc ?? null };
         delete state.data.failures[key];
-        log.debug('matched', { key, slaveTrackId, matchedBy });
-        return { slaveTrackId, matchedBy };
+        log.debug('matched', { key, matchedId, matchedBy });
+        return { matchedId, matchedBy };
       };
 
       if (track.isrc) {
-        const candidates = await slave.findTracksByIsrc(track.isrc);
+        const candidates = await target.findTracksByIsrc(track.isrc);
         // A lone ISRC hit is authoritative — same recording by definition,
         // even when the platforms label versions differently (TIDAL keeps
         // "Remix" in a separate field). Version guards only arbitrate
         // between multiple pressings; if they exclude everything, fall back
         // to closest-duration among the (same-recording) candidates.
-        if (candidates.length === 1) return record(candidates[0].id, 'isrc');
+        if (candidates.length === 1) return record(candidates[0].id, 'isrc', candidates[0].isrc);
         if (candidates.length > 1) {
           const pick = pickCandidate(track, candidates) ?? closestByDuration(track, candidates);
-          if (pick) return record(pick.id, 'isrc');
+          if (pick) return record(pick.id, 'isrc', pick.isrc);
         }
       }
 
-      const searched = await slave.searchTracks({
+      const searched = await target.searchTracks({
         title: track.title,
         artist: track.artists?.[0],
         album: track.album,
       });
       const viable = searched.filter((c) => fallbackMatches(track, c));
       const pick = pickCandidate(track, viable);
-      if (pick) return record(pick.id, 'fallback');
+      if (pick) return record(pick.id, 'fallback', pick.isrc);
 
-      const reason = track.isrc ? 'no-match-on-slave' : 'no-isrc-and-no-metadata-match';
+      const reason = track.isrc ? 'no-match-on-target' : 'no-isrc-and-no-metadata-match';
       state.data.failures[key] = {
         reason,
         failedAtRun: state.data.runCount,

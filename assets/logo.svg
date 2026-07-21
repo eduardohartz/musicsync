@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="musicsync logo">
+  <defs>
+    <linearGradient id="ms-loop" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5457d6"/>
+      <stop offset="1" stop-color="#2aa79b"/>
+    </linearGradient>
+  </defs>
+  <!-- sync loop: two arcs with bead gaps -->
+  <path d="M12.4 26.6 A21 21 0 0 1 51.6 26.6" fill="none" stroke="url(#ms-loop)" stroke-width="5" stroke-linecap="round"/>
+  <path d="M51.6 37.4 A21 21 0 0 1 12.4 37.4" fill="none" stroke="url(#ms-loop)" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="53.4" cy="32" r="3.4" fill="#2aa79b"/>
+  <circle cx="10.6" cy="32" r="3.4" fill="#5457d6"/>
+  <!-- eighth note -->
+  <g fill="#25242b">
+    <circle cx="30.4" cy="38.6" r="3.2"/>
+    <path d="M32.9 38.6 V23.6 a1.1 1.1 0 0 1 2.2 0 c.2 2.6 1.7 3.6 3.4 4.9 a1 1 0 0 1 -1.2 1.6 c-1-.7-1.6-1.2-2.2-1.9 V38.6 Z"/>
+  </g>
+</svg>

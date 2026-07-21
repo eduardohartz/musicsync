@@ -3,6 +3,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import cron from 'node-cron';
 import { loadConfig, ConfigError } from './config.js';
+import { readSettings, writeSettings, updateSettings } from './settings.js';
 import { createLogger } from './logger.js';
 import { createTokenStore } from './tokens.js';
 import { createStateStore } from './state.js';
@@ -14,48 +15,75 @@ import { createSyncEngine } from './sync.js';
 import { writeHealth } from './health.js';
 import { AuthRequiredError } from './http.js';
 
-/** Wire every component from ENV config. Exits with a readable message on bad config. */
-export function buildContext() {
-  let config;
-  try {
-    config = loadConfig();
-  } catch (err) {
-    if (err instanceof ConfigError) {
-      process.stderr.write(`${err.message}\n`);
-      process.exit(1);
+const VERSION = readJson(new URL('../package.json', import.meta.url).pathname, {}).version ?? 'dev';
+
+const SETTINGS_FIELDS = {
+  spotify: ['clientId', 'clientSecret', 'market', 'playlistPublic'],
+  tidal: ['clientId', 'clientSecret', 'accessType'],
+  sync: ['mode', 'source', 'pairs', 'periodic', 'cron', 'onStart', 'tz', 'dryRun', 'matchRetryRuns'],
+};
+
+/** Keep only known fields; a blank clientSecret means "keep the stored one". */
+function sanitizeSettingsPatch(patch) {
+  const out = {};
+  for (const [section, fields] of Object.entries(SETTINGS_FIELDS)) {
+    if (!patch[section] || typeof patch[section] !== 'object') continue;
+    const clean = {};
+    for (const field of fields) {
+      const value = patch[section][field];
+      if (value === undefined) continue;
+      if (field === 'clientSecret' && value === '') continue;
+      clean[field] = value;
     }
-    throw err;
+    if (Object.keys(clean).length > 0) out[section] = clean;
   }
-  const logger = createLogger(config.logLevel);
-  const tokens = createTokenStore(config.configDir, logger.child('tokens'));
-  const state = createStateStore(config.configDir, logger.child('state'));
-  const spotify = createSpotifyAdapter({ config, tokens, logger });
-  const tidal = createTidalAdapter({ config, tokens, logger });
-  const [master, slave] = config.sync.master === 'spotify' ? [spotify, tidal] : [tidal, spotify];
-  const overrides = readJson(path.join(config.configDir, 'overrides.json'), {}, logger.child('overrides'));
-  const matcher = createMatcher({
-    slave, state, overrides, logger, retryRuns: config.sync.matchRetryRuns,
-  });
-  const engine = createSyncEngine({ config, master, slave, state, matcher, logger });
-  return { config, logger, tokens, state, adapters: { spotify, tidal }, master, slave, matcher, engine };
+  if (typeof patch.logLevel === 'string') out.logLevel = patch.logLevel;
+  return out;
 }
 
-export async function main() {
-  const ctx = buildContext();
-  const { config, logger, tokens, engine, adapters } = ctx;
-  const log = logger.child('service');
-
-  for (const svc of ['spotify', 'tidal']) {
-    if (!tokens.get(svc)?.refreshToken) {
-      log.error(`${svc} is not authorized yet — run "docker compose run --rm -p 127.0.0.1:${config.authPort}:${config.authPort} musicsync auth" (or "npm run auth") first`);
-      process.exit(1);
-    }
+function mergeSettings(current, patch) {
+  const next = { ...current };
+  for (const [key, value] of Object.entries(patch)) {
+    next[key] = value && typeof value === 'object' && !Array.isArray(value)
+      ? { ...current[key], ...value }
+      : value;
   }
+  return next;
+}
+
+/**
+ * The runtime owns config, adapters, engine, scheduling, and service phase.
+ * The web panel mutates it via applySettings/triggerSync; everything reads
+ * through accessors so panel-applied settings take effect without restart.
+ */
+export function createRuntime({ env = process.env } = {}) {
+  const configDir = env.CONFIG_DIR ?? '/config';
+  let settings = readSettings(configDir);
+  let config = loadConfig(env, settings); // ConfigError on malformed values is fatal upstream
+  const logger = createLogger(config.logLevel);
+  const log = logger.child('service');
+  const tokens = createTokenStore(configDir, logger.child('tokens'));
+  const state = createStateStore(configDir, logger.child('state'));
+
+  let adapters;
+  let engine;
+  function build() {
+    adapters = {
+      spotify: createSpotifyAdapter({ config, tokens, logger }),
+      tidal: createTidalAdapter({ config, tokens, logger }),
+    };
+    const overrides = readJson(path.join(configDir, 'overrides.json'), {}, logger.child('overrides'));
+    const matcher = createMatcher({ adapters, state, overrides, logger, retryRuns: config.sync.matchRetryRuns });
+    engine = createSyncEngine({ config, adapters, state, matcher, logger });
+  }
+  build();
 
   let inFlight = null;
   let authRequired = false;
+  let authRequiredPlatform = null;
   let tokensMtimeAtAuthError = 0;
   let scheduledTask = null;
+  let lastRunError = null;
 
   const tokensMtime = () => {
     try {
@@ -64,45 +92,82 @@ export async function main() {
       return 0;
     }
   };
+  const connected = (platform) => Boolean(tokens.get(platform)?.refreshToken);
+  const ready = () => config.incomplete.length === 0 && connected('spotify') && connected('tidal');
+  const needsSetup = () => !settings.setupComplete && !ready();
+
+  function phase() {
+    if (inFlight) return 'syncing';
+    if (authRequired) return 'auth_required';
+    if (!ready()) return 'setup';
+    return 'idle';
+  }
+
+  function writePhaseHealth() {
+    const current = phase();
+    if (current === 'setup') writeHealth(configDir, { status: 'SETUP', at: new Date().toISOString() });
+    else if (current === 'auth_required') {
+      writeHealth(configDir, { status: 'AUTH_REQUIRED', platform: authRequiredPlatform, at: new Date().toISOString() });
+    } else if (current === 'idle') {
+      // Configured + connected but no completed run yet (fresh setup,
+      // post-reconnect, manual mode): healthy, awaiting a run.
+      writeHealth(configDir, { status: 'READY', at: new Date().toISOString() });
+    }
+  }
 
   async function runOnce(trigger) {
     // cron's noOverlap only covers cron-triggered executions; this guard also
-    // protects the startup run from a cron tick landing while it's running.
+    // protects panel/startup runs from overlapping with a cron tick.
     if (inFlight) {
       log.warn(`previous sync still in progress, skipping ${trigger} trigger`);
       return;
     }
+    if (!ready()) {
+      log.warn(`sync skipped (${trigger}): configuration or account connection incomplete`);
+      return;
+    }
     if (authRequired) {
       if (tokensMtime() === tokensMtimeAtAuthError) {
-        log.error('sync suspended: authorization expired — run "musicsync auth", then the next tick resumes automatically');
+        log.error('sync suspended: authorization expired — reconnect the account in the web panel');
         return;
       }
       authRequired = false; // tokens changed on disk; try again
-      log.info('token file changed, resuming syncs');
+      log.info('tokens changed, resuming syncs');
     }
 
     const spotifyAuth = adapters.spotify.describeAuth();
     if (spotifyAuth.warn) {
-      log.warn(`Spotify authorization expires in ~${spotifyAuth.daysLeft} days — refresh tokens hard-expire 6 months after consent; re-run "musicsync auth" soon`, { authorizedAt: spotifyAuth.authorizedAt });
+      log.warn(`Spotify authorization expires in ~${spotifyAuth.daysLeft} days — refresh tokens hard-expire 6 months after consent; reconnect soon`, { authorizedAt: spotifyAuth.authorizedAt });
     }
 
     log.info(`sync run starting (${trigger})`);
     inFlight = (async () => {
       try {
         await engine.runSync();
-        writeHealth(config.configDir, {
+        lastRunError = null;
+        writeHealth(configDir, {
           status: 'OK',
           lastOkAt: new Date().toISOString(),
+          periodic: config.sync.periodic,
           nextDueMs: scheduledTask?.msToNext?.() ?? null,
         });
       } catch (err) {
         if (err instanceof AuthRequiredError) {
           authRequired = true;
+          authRequiredPlatform = err.platform;
           tokensMtimeAtAuthError = tokensMtime();
-          writeHealth(config.configDir, { status: 'AUTH_REQUIRED', platform: err.platform, at: new Date().toISOString() });
+          writePhaseHealth();
           log.error(`AUTHORIZATION REQUIRED for ${err.platform}: ${err.message}`);
-          log.error('musicsync keeps running but will not sync until you re-authorize.');
+          log.error('musicsync keeps running but will not sync until you reconnect.');
         } else {
+          lastRunError = String(err);
+          const previous = readJson(path.join(configDir, 'health.json'), null);
+          writeHealth(configDir, {
+            status: 'FAIL',
+            error: String(err),
+            at: new Date().toISOString(),
+            lastOkAt: previous?.lastOkAt ?? null,
+          });
           log.error('sync run failed', { error: String(err.stack ?? err) });
         }
       } finally {
@@ -112,25 +177,160 @@ export async function main() {
     await inFlight;
   }
 
-  scheduledTask = cron.schedule(config.sync.cron, () => runOnce('cron'), {
-    name: 'musicsync',
-    timezone: config.sync.tz,
-    noOverlap: true,
-  });
-  log.info('scheduled', {
-    cron: config.sync.cron,
-    tz: config.sync.tz ?? 'system',
-    master: config.sync.master,
-    dryRun: config.sync.dryRun || undefined,
-    nextRun: scheduledTask.getNextRun()?.toISOString(),
-  });
+  function scheduleCron() {
+    if (scheduledTask) {
+      scheduledTask.destroy();
+      scheduledTask = null;
+    }
+    if (!config.sync.periodic || !ready()) return;
+    scheduledTask = cron.schedule(config.sync.cron, () => runOnce('cron'), {
+      timezone: config.sync.tz,
+      noOverlap: true,
+    });
+    log.info('scheduled', {
+      cron: config.sync.cron,
+      tz: config.sync.tz ?? 'system',
+      mode: config.sync.mode,
+      nextRun: scheduledTask.getNextRun()?.toISOString(),
+    });
+  }
 
+  const runtime = {
+    logger,
+    tokens,
+    state,
+    configDir,
+    config: () => config,
+    adapters: () => adapters,
+    engine: () => engine,
+    settings: () => settings,
+    phase,
+    ready,
+    connected,
+    runOnce,
+    scheduleCron,
+    writePhaseHealth,
+
+    triggerSync(trigger) {
+      if (inFlight) return { busy: true };
+      if (!ready()) return { blocked: 'configuration or account connection is incomplete' };
+      void runOnce(trigger);
+      return { started: true };
+    },
+
+    async applySettings(patch) {
+      const clean = sanitizeSettingsPatch(patch);
+      const candidateSettings = mergeSettings(settings, clean);
+      const candidate = loadConfig(env, candidateSettings); // throws ConfigError with problems
+      writeSettings(configDir, candidateSettings);
+      settings = candidateSettings;
+      config = candidate;
+      logger.setLevel(config.logLevel);
+      build();
+      scheduleCron();
+      writePhaseHealth();
+      log.info('settings applied from panel', { incomplete: config.incomplete });
+      return config;
+    },
+
+    async completeSetup() {
+      settings = updateSettings(configDir, { setupComplete: true });
+      config = loadConfig(env, settings);
+      build();
+      scheduleCron();
+      writePhaseHealth();
+      log.info('setup completed');
+    },
+
+    onConnected() {
+      authRequired = false;
+      authRequiredPlatform = null;
+      tokensMtimeAtAuthError = 0;
+      if (ready()) scheduleCron();
+      // Clear a lingering AUTH_REQUIRED/SETUP record so the container goes
+      // healthy as soon as the account is reconnected, not a cron-interval later.
+      writePhaseHealth();
+    },
+
+    overview() {
+      const pairs = Object.entries(state.data.pairs).map(([primaryId, ps]) => ({
+        primaryId,
+        name: ps.name ?? null,
+        spotifyPlaylistId: ps.spotifyPlaylistId ?? null,
+        tidalPlaylistId: ps.tidalPlaylistId ?? null,
+        lastResult: ps.lastResult ?? null,
+        lastSyncedAt: ps.lastSyncedAt ?? null,
+        unmatchedCount: ps.unmatchedCount ?? 0,
+      }));
+      return {
+        version: VERSION,
+        needsSetup: needsSetup(),
+        incomplete: config.incomplete,
+        phase: phase(),
+        syncing: Boolean(inFlight),
+        lastRunError,
+        mode: config.sync.mode,
+        source: config.sync.source,
+        periodic: config.sync.periodic,
+        cron: config.sync.cron,
+        tz: config.sync.tz ?? null,
+        dryRun: config.sync.dryRun,
+        nextRun: scheduledTask?.getNextRun()?.toISOString() ?? null,
+        connections: {
+          spotify: { connected: connected('spotify'), ...adapters.spotify.describeAuth() },
+          tidal: { connected: connected('tidal'), ...adapters.tidal.describeAuth() },
+        },
+        configuredPairs: config.sync.pairs === 'all' ? 'all' : config.sync.pairs.length,
+        pairs,
+        unmatchedTotal: Object.keys(state.data.failures).length,
+        runCount: state.data.runCount,
+      };
+    },
+
+    unmatchedReport() {
+      return readJson(state.reportFile, { generatedAt: null, unmatched: [] });
+    },
+
+    async shutdown() {
+      await cron.shutdown(10_000);
+      if (inFlight) await inFlight;
+      state.save();
+    },
+  };
+  return runtime;
+}
+
+export async function main() {
+  let runtime;
+  try {
+    runtime = createRuntime();
+  } catch (err) {
+    if (err instanceof ConfigError) {
+      process.stderr.write(`${err.message}\n`);
+      process.exit(1);
+    }
+    throw err;
+  }
+  const config = runtime.config();
+  const log = runtime.logger.child('service');
+
+  // The web panel IS the product surface — no panel, no service.
+  if (!config.panel.enabled) {
+    process.stderr.write('musicsync requires the web panel: set WEB_PANEL_PASSWORD (or WEB_PANEL_BYPASS_AUTH=true for trusted networks) and restart.\n');
+    process.exit(1);
+  }
+
+  log.info(`musicsync v${VERSION} starting`, { mode: config.sync.mode });
+  const { createWebServer } = await import('./web/server.js');
+  const webServer = createWebServer({ runtime, logger: runtime.logger }).start();
+
+  // Register signal handlers BEFORE the (possibly long) startup sync so
+  // `docker stop` during a first big run still shuts down gracefully.
   async function shutdown(signal) {
     log.info(`${signal} received, shutting down`);
     try {
-      await cron.shutdown(10_000);
-      if (inFlight) await inFlight;
-      ctx.state.save();
+      await runtime.shutdown();
+      if (webServer) await new Promise((resolve) => webServer.close(resolve));
     } catch (err) {
       log.error('shutdown error', { error: String(err) });
     }
@@ -139,7 +339,15 @@ export async function main() {
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
 
-  if (config.sync.onStart) await runOnce('startup');
+  if (!runtime.ready()) {
+    runtime.writePhaseHealth();
+    log.info(`setup needed — open the web panel at http://127.0.0.1:${config.panel.port} to finish configuration`);
+  } else {
+    runtime.scheduleCron();
+    runtime.writePhaseHealth();
+    if (config.sync.onStart) await runtime.runOnce('startup');
+    else if (!config.sync.periodic) log.info('periodic sync is off — trigger runs from the panel');
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

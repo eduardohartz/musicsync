@@ -95,7 +95,7 @@ export function createSpotifyAdapter({ config, tokens, logger, fetchImpl, sleep 
       const out = [];
       for await (const page of pages(`${API}/me/playlists?limit=50`)) {
         for (const p of page.items ?? []) {
-          if (p?.owner?.id === userId) out.push({ id: p.id, name: p.name });
+          if (p?.owner?.id === userId) out.push({ id: p.id, name: p.name, count: p.tracks?.total ?? null });
         }
       }
       return out;
@@ -171,6 +171,42 @@ export function createSpotifyAdapter({ config, tokens, logger, fetchImpl, sleep 
       log.info('rewrote playlist', { id, count: trackIds.length });
     },
 
+    /** Set-style append for two-way sync. Spotify has no duplicate restriction. */
+    async addTracks(id, trackIds) {
+      for (const part of chunk([...new Set(trackIds)], 100)) {
+        await http.request(`${API}/playlists/${id}/items`, {
+          method: 'POST',
+          json: { uris: part.map((tid) => `spotify:track:${tid}`) },
+          auth: bearer,
+          retryAmbiguous: false, // appends are not idempotent on Spotify
+        });
+      }
+      return { absent: [] };
+    },
+
+    /**
+     * Set-style removal for two-way sync. Entries: [{id}]. Spotify's
+     * remove-by-URI deletes every occurrence of the track — correct under
+     * two-way's set semantics. Removal is idempotent, so retries stay on.
+     * `snapshotId` pins the delete to the playlist state the caller diffed
+     * (research §2.4); each response's snapshot_id chains into the next
+     * chunk so a concurrent user edit isn't silently clobbered.
+     */
+    async removeTracks(id, entries, { snapshotId } = {}) {
+      let snapshot = snapshotId;
+      for (const part of chunk(entries, 100)) {
+        const res = await http.request(`${API}/playlists/${id}/items`, {
+          method: 'DELETE',
+          json: {
+            items: part.map((e) => ({ uri: `spotify:track:${e.id}` })),
+            ...(snapshot ? { snapshot_id: snapshot } : {}),
+          },
+          auth: bearer,
+        });
+        snapshot = res?.snapshot_id ?? snapshot;
+      }
+    },
+
     async findTracksByIsrc(isrc) {
       const url = `${API}/search?q=${encodeURIComponent(`isrc:${isrc}`)}&type=track&limit=10&market=${config.spotify.market}`;
       const res = await http.request(url, { auth: bearer });
@@ -225,7 +261,7 @@ export function createSpotifyAdapter({ config, tokens, logger, fetchImpl, sleep 
       };
     },
 
-    // --- auth bootstrap helpers ---
+    // --- OAuth helpers (used by the web panel) ---
     buildAuthorizeUrl({ redirectUri, state }) {
       const params = new URLSearchParams({
         client_id: config.spotify.clientId,

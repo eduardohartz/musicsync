@@ -14,7 +14,7 @@ export class ApiError extends Error {
 /** Thrown when a refresh token is expired/revoked — the service must re-auth. */
 export class AuthRequiredError extends Error {
   constructor(platform, detail) {
-    super(`${platform} authorization expired or revoked — run "musicsync auth" again${detail ? ` (${detail})` : ''}`);
+    super(`${platform} authorization expired or revoked — reconnect it in the web panel${detail ? ` (${detail})` : ''}`);
     this.name = 'AuthRequiredError';
     this.platform = platform;
   }

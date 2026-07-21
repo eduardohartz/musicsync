@@ -205,14 +205,16 @@ export function createTidalAdapter({ config, tokens, logger, fetchImpl, sleep })
   }
 
   /**
-   * Append tracks in 50-chunks. A 422 item rejection (duplicate / playlist
-   * cap) fails the whole chunk on TIDAL's side, so fall back to per-item
-   * appends and count what was genuinely dropped — silently losing a chunk
-   * would be locked in by the engine's change-token bookkeeping.
+   * Append tracks in 50-chunks. A 422 item rejection fails the whole chunk
+   * on TIDAL's side, so fall back to per-item appends — silently losing a
+   * chunk would be locked in by the engine's change-token bookkeeping.
+   * Outcome per item: DUPLICATE means the track IS in the playlist (present,
+   * not lost); TOO_MANY (or other item rejection) means genuinely absent.
+   * Returns {absent: [trackIds]} for the caller's bookkeeping.
    */
   async function appendItems(playlistId, trackIds) {
     const url = `${API}/playlists/${playlistId}/relationships/items`;
-    let dropped = 0;
+    const absent = [];
     for (const part of chunk(trackIds, 50)) {
       try {
         await mutate(url, { method: 'POST', json: { data: part.map((id) => ({ id, type: 'tracks' })) } });
@@ -224,13 +226,17 @@ export function createTidalAdapter({ config, tokens, logger, fetchImpl, sleep })
             await mutate(url, { method: 'POST', json: { data: [{ id, type: 'tracks' }] } });
           } catch (itemErr) {
             if (!isItemRejection(itemErr)) throw itemErr;
-            dropped += 1;
-            log.warn('item rejected by tidal', { playlist: playlistId, trackId: id, code: itemErr.code });
+            if (itemErr.code === 'DUPLICATE_ITEMS_IN_COLLECTION') {
+              log.debug('item already in playlist', { playlist: playlistId, trackId: id });
+            } else {
+              absent.push(id);
+              log.warn('item rejected by tidal', { playlist: playlistId, trackId: id, code: itemErr.code });
+            }
           }
         }
       }
     }
-    return dropped;
+    return { absent };
   }
 
   return {
@@ -240,7 +246,9 @@ export function createTidalAdapter({ config, tokens, logger, fetchImpl, sleep })
     async listOwnPlaylists() {
       const out = [];
       for await (const page of pages(`${API}/playlists?filter[owners.id]=me`, userBearer)) {
-        for (const p of page.data ?? []) out.push({ id: p.id, name: p.attributes?.name });
+        for (const p of page.data ?? []) {
+          out.push({ id: p.id, name: p.attributes?.name, count: p.attributes?.numberOfItems ?? null });
+        }
       }
       return out;
     },
@@ -310,9 +318,9 @@ export function createTidalAdapter({ config, tokens, logger, fetchImpl, sleep })
         return { dropped: 0 };
       }
       if (strategy.type === 'append') {
-        const dropped = await appendItems(id, strategy.toAppend);
-        log.info('appended tracks', { id, count: strategy.toAppend.length - dropped, dropped: dropped || undefined });
-        return { dropped };
+        const { absent } = await appendItems(id, strategy.toAppend);
+        log.info('appended tracks', { id, count: strategy.toAppend.length - absent.length, dropped: absent.length || undefined });
+        return { dropped: absent.length };
       }
       // Clear-and-rebuild keeps the playlist id stable and avoids the
       // 20-item reorder endpoint and its undocumented positionBefore
@@ -324,9 +332,28 @@ export function createTidalAdapter({ config, tokens, logger, fetchImpl, sleep })
           json: { data: part.map((r) => ({ id: r.id, type: r.type, meta: { itemId: r.itemId } })) },
         });
       }
-      const dropped = await appendItems(id, target);
-      log.info('rebuilt playlist', { id, removed: refs.length, added: target.length - dropped, dropped: dropped || undefined });
-      return { dropped };
+      const { absent } = await appendItems(id, target);
+      log.info('rebuilt playlist', { id, removed: refs.length, added: target.length - absent.length, dropped: absent.length || undefined });
+      return { dropped: absent.length };
+    },
+
+    /** Set-style append for two-way sync. Returns {absent: [trackIds]} that could not land. */
+    async addTracks(id, trackIds) {
+      return appendItems(id, [...new Set(trackIds)]);
+    },
+
+    /** Set-style removal for two-way sync. Entries: [{id, itemId}] — itemId from a fresh items fetch. */
+    async removeTracks(id, entries) {
+      const withItemId = entries.filter((e) => e.itemId);
+      if (withItemId.length < entries.length) {
+        log.warn('skipping removals without itemId', { id, skipped: entries.length - withItemId.length });
+      }
+      for (const part of chunk(withItemId, 50)) {
+        await mutate(`${API}/playlists/${id}/relationships/items`, {
+          method: 'DELETE',
+          json: { data: part.map((e) => ({ id: e.id, type: 'tracks', meta: { itemId: e.itemId } })) },
+        });
+      }
     },
 
     async findTracksByIsrc(isrc) {
@@ -369,7 +396,7 @@ export function createTidalAdapter({ config, tokens, logger, fetchImpl, sleep })
       return { authorized: true, authorizedAt: stored.authorizedAt ?? null, daysLeft: null, warn: false };
     },
 
-    // --- auth bootstrap helpers ---
+    // --- OAuth helpers (used by the web panel) ---
     buildAuthorizeUrl({ redirectUri, state, challenge }) {
       const params = new URLSearchParams({
         response_type: 'code',

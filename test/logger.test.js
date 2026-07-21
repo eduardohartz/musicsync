@@ -31,3 +31,14 @@ test('extra payload is JSON-serialized', () => {
   createLogger('info', streams).child('m').info('msg', { a: 1 });
   assert.match(lines.out[0], /msg \{"a":1\}/);
 });
+
+test('setLevel takes effect for already-created children', () => {
+  const { lines, streams } = capture();
+  const logger = createLogger('info', streams);
+  const child = logger.child('m');
+  child.debug('hidden');
+  logger.setLevel('debug');
+  child.debug('visible');
+  assert.equal(lines.out.filter((l) => l.includes('hidden')).length, 0);
+  assert.equal(lines.out.filter((l) => l.includes('visible')).length, 1);
+});

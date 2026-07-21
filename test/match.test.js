@@ -56,26 +56,26 @@ test('pickCandidate is deterministic regardless of input order', () => {
 function makeMatcher({ overrides = {}, retryRuns = 10, isrcResults = [], searchResults = [] } = {}) {
   const state = createStateStore(tmpDir());
   const calls = { isrc: 0, search: 0 };
-  const slave = {
+  const tidal = {
     findTracksByIsrc: async () => { calls.isrc++; return isrcResults; },
     searchTracks: async () => { calls.search++; return searchResults; },
   };
-  return { matcher: createMatcher({ slave, state, overrides, logger: silentLogger, retryRuns }), state, calls };
+  return { matcher: createMatcher({ adapters: { tidal }, state, overrides, logger: silentLogger, retryRuns }), state, calls };
 }
 
 test('override wins before cache and lookups', async () => {
   const { matcher, calls } = makeMatcher({ overrides: { 'spotify:m1': 'forced-id' } });
-  const result = await matcher.matchTrack('spotify', track());
-  assert.deepEqual(result, { slaveTrackId: 'forced-id', matchedBy: 'manual' });
+  const result = await matcher.matchTrack(track(), 'spotify', 'tidal');
+  assert.deepEqual(result, { matchedId: 'forced-id', matchedBy: 'manual' });
   assert.equal(calls.isrc + calls.search, 0);
 });
 
 test('isrc match is cached; second call skips the API', async () => {
   const { matcher, calls, state } = makeMatcher({ isrcResults: [{ id: 's9', title: 'Song Title', durationMs: 200000 }] });
-  const first = await matcher.matchTrack('spotify', track());
-  assert.deepEqual(first, { slaveTrackId: 's9', matchedBy: 'isrc' });
-  const second = await matcher.matchTrack('spotify', track());
-  assert.deepEqual(second, { slaveTrackId: 's9', matchedBy: 'isrc' });
+  const first = await matcher.matchTrack(track(), 'spotify', 'tidal');
+  assert.deepEqual(first, { matchedId: 's9', matchedBy: 'isrc' });
+  const second = await matcher.matchTrack(track(), 'spotify', 'tidal');
+  assert.deepEqual(second, { matchedId: 's9', matchedBy: 'isrc' });
   assert.equal(calls.isrc, 1);
   assert.equal(state.data.mappings['spotify:m1'].isrc, 'ISRC1');
 });
@@ -88,19 +88,19 @@ test('falls back to metadata search when isrc misses', async () => {
       { id: 'good', title: 'Song Title', artists: ['Some Artist'], durationMs: 200500 },
     ],
   });
-  assert.deepEqual(await matcher.matchTrack('spotify', track()), { slaveTrackId: 'good', matchedBy: 'fallback' });
+  assert.deepEqual(await matcher.matchTrack(track(), 'spotify', 'tidal'), { matchedId: 'good', matchedBy: 'fallback' });
 });
 
 test('unmatched goes to failure cache and is not retried until retryRuns elapse', async () => {
   const { matcher, calls, state } = makeMatcher({ retryRuns: 3 });
-  const first = await matcher.matchTrack('spotify', track());
+  const first = await matcher.matchTrack(track(), 'spotify', 'tidal');
   assert.equal(first.unmatched, true);
-  assert.equal(first.reason, 'no-match-on-slave');
-  const cachedMiss = await matcher.matchTrack('spotify', track());
+  assert.equal(first.reason, 'no-match-on-target');
+  const cachedMiss = await matcher.matchTrack(track(), 'spotify', 'tidal');
   assert.equal(cachedMiss.fromFailureCache, true);
   assert.equal(calls.isrc, 1, 'no second lookup while cached');
   state.data.runCount += 3;
-  await matcher.matchTrack('spotify', track());
+  await matcher.matchTrack(track(), 'spotify', 'tidal');
   assert.equal(calls.isrc, 2, 'retried after retryRuns runs');
 });
 
@@ -108,8 +108,8 @@ test('single ISRC candidate is authoritative even with one-sided version label',
   const { matcher } = makeMatcher({
     isrcResults: [{ id: 'remix-id', title: 'Song', version: 'Remix', durationMs: 200000 }],
   });
-  assert.deepEqual(await matcher.matchTrack('spotify', track({ title: 'Song' })),
-    { slaveTrackId: 'remix-id', matchedBy: 'isrc' });
+  assert.deepEqual(await matcher.matchTrack(track({ title: 'Song' }), 'spotify', 'tidal'),
+    { matchedId: 'remix-id', matchedBy: 'isrc' });
 });
 
 test('multiple all-conflicting ISRC candidates fall back to closest duration', async () => {
@@ -119,6 +119,13 @@ test('multiple all-conflicting ISRC candidates fall back to closest duration', a
       { id: 'near', title: 'Song (Remix)', durationMs: 200100 },
     ],
   });
-  assert.deepEqual(await matcher.matchTrack('spotify', track({ title: 'Song' })),
-    { slaveTrackId: 'near', matchedBy: 'isrc' });
+  assert.deepEqual(await matcher.matchTrack(track({ title: 'Song' }), 'spotify', 'tidal'),
+    { matchedId: 'near', matchedBy: 'isrc' });
+});
+
+test('successful match records the reverse mapping for two-way cache hits', async () => {
+  const { matcher, state } = makeMatcher({ isrcResults: [{ id: 't42', title: 'Song Title', isrc: 'ISRC1', durationMs: 200000 }] });
+  await matcher.matchTrack(track(), 'spotify', 'tidal');
+  assert.equal(state.data.mappings['spotify:m1'].matchedId, 't42');
+  assert.equal(state.data.mappings['tidal:t42'].matchedId, 'm1');
 });

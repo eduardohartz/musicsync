@@ -69,3 +69,14 @@ test('unmatched report is written with entries', () => {
   assert.equal(report.unmatched.length, 1);
   assert.ok(report.generatedAt);
 });
+
+test('settings store round-trips, merges sections, 0600', async () => {
+  const { readSettings, writeSettings, updateSettings } = await import('../src/settings.js');
+  const dir = tmp();
+  assert.deepEqual(readSettings(dir), {});
+  writeSettings(dir, { sync: { mode: 'two-way' } });
+  updateSettings(dir, { sync: { periodic: false }, logLevel: 'debug' });
+  assert.deepEqual(readSettings(dir), { sync: { mode: 'two-way', periodic: false }, logLevel: 'debug' });
+  const mode = fs.statSync(path.join(dir, 'settings.json')).mode & 0o777;
+  assert.equal(mode, 0o600);
+});

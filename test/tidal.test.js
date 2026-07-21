@@ -258,7 +258,7 @@ test('422 chunk rejection falls back to per-item appends and reports drops', asy
           return { status: 422, body: { errors: [{ code: 'DUPLICATE_ITEMS_IN_COLLECTION' }] } };
         }
         return ids[0] === 'poison'
-          ? { status: 422, body: { errors: [{ code: 'DUPLICATE_ITEMS_IN_COLLECTION' }] } }
+          ? { status: 422, body: { errors: [{ code: 'TOO_MANY_ITEMS_IN_COLLECTION' }] } }
           : { status: 204 };
       },
     },

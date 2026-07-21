@@ -12,7 +12,7 @@ test('missing heartbeat is unhealthy', () => {
 test('AUTH_REQUIRED is unhealthy with actionable reason', () => {
   const result = evaluateHealth({ status: 'AUTH_REQUIRED' }, now);
   assert.equal(result.healthy, false);
-  assert.match(result.reason, /musicsync auth/);
+  assert.match(result.reason, /web panel/);
 });
 
 test('fresh OK heartbeat is healthy', () => {
@@ -44,4 +44,18 @@ test('writeHealth/readHealth round-trip', () => {
   const dir = tmpDir();
   writeHealth(dir, { status: 'OK', lastOkAt: 'x' });
   assert.deepEqual(readHealth(dir), { status: 'OK', lastOkAt: 'x' });
+});
+
+test('SETUP phase and manual-only mode are healthy', () => {
+  assert.equal(evaluateHealth({ status: 'SETUP' }, now).healthy, true);
+  assert.equal(evaluateHealth({
+    status: 'OK', periodic: false, lastOkAt: new Date(now - 90 * 24 * 3600_000).toISOString(),
+  }, now).healthy, true, 'staleness is meaningless without periodic sync');
+});
+
+test('READY is healthy; FAIL is unhealthy with the error surfaced', () => {
+  assert.equal(evaluateHealth({ status: 'READY' }, now).healthy, true);
+  const fail = evaluateHealth({ status: 'FAIL', error: 'tidal 502' }, now);
+  assert.equal(fail.healthy, false);
+  assert.match(fail.reason, /tidal 502/);
 });

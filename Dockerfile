@@ -1,9 +1,9 @@
-# musicsync — one-way Spotify↔TIDAL playlist sync
+# musicsync — Spotify↔TIDAL playlist sync
 FROM node:24-alpine
 
 ENV NODE_ENV=production \
     CONFIG_DIR=/config \
-    AUTH_BIND=0.0.0.0
+    PANEL_BIND=0.0.0.0
 
 WORKDIR /app
 
@@ -23,5 +23,4 @@ HEALTHCHECK --interval=5m --timeout=10s --start-period=30s \
 
 # Direct node (never npm) so SIGTERM reaches the process; run compose with
 # init: true so PID 1 signal handling is correct.
-ENTRYPOINT ["node", "src/cli.js"]
-CMD []
+CMD ["node", "src/index.js"]
