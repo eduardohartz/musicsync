@@ -1,5 +1,19 @@
+import { AuthRequiredError } from './http.js';
+
 const VERSION_MARKERS = ['instrumental', 'acapella', 'remix'];
 const DURATION_TOLERANCE_MS = 2000;
+
+/**
+ * Canonical ISRC: 12 alphanumerics, uppercase. Source platforms sometimes
+ * deliver lowercase (TIDAL's filter[isrc] rejects those with a 400) or
+ * dash-separated forms; anything that doesn't normalize cleanly is treated
+ * as absent so matching falls back to metadata search.
+ */
+export function normalizeIsrc(raw) {
+  if (!raw) return null;
+  const cleaned = String(raw).replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
+  return /^[A-Z0-9]{12}$/.test(cleaned) ? cleaned : null;
+}
 
 /** True iff every letter code point is below 0x0250 (basic Latin + extensions). */
 export function isLatinScript(s) {
@@ -103,39 +117,63 @@ export function createMatcher({ adapters, state, overrides = {}, logger, retryRu
       }
 
       const target = adapters[toPlatform];
+      const isrc = normalizeIsrc(track.isrc);
       const record = (matchedId, matchedBy, matchedIsrc) => {
-        state.data.mappings[key] = { matchedId, matchedBy, isrc: track.isrc ?? null };
+        state.data.mappings[key] = { matchedId, matchedBy, isrc: isrc ?? null };
         const reverseKey = `${toPlatform}:${matchedId}`;
-        state.data.mappings[reverseKey] ??= { matchedId: track.id, matchedBy, isrc: matchedIsrc ?? track.isrc ?? null };
+        state.data.mappings[reverseKey] ??= { matchedId: track.id, matchedBy, isrc: normalizeIsrc(matchedIsrc) ?? isrc };
         delete state.data.failures[key];
         log.debug('matched', { key, matchedId, matchedBy });
         return { matchedId, matchedBy };
       };
 
-      if (track.isrc) {
-        const candidates = await target.findTracksByIsrc(track.isrc);
+      // One bad lookup must cost one track, not the whole playlist: catch
+      // per-track API errors (a malformed ISRC in the source catalog gets a
+      // 400 from TIDAL), continue down the pipeline, and keep transient
+      // failures OUT of the failure cache so the next run retries them.
+      let lookupFailed = false;
+      const guard = async (what, fn) => {
+        try {
+          return await fn();
+        } catch (err) {
+          if (err instanceof AuthRequiredError) throw err;
+          lookupFailed = true;
+          log.warn(`${what} lookup failed for track, continuing`, { key, error: String(err.message ?? err) });
+          return null;
+        }
+      };
+
+      if (isrc) {
+        const candidates = await guard('isrc', () => target.findTracksByIsrc(isrc));
         // A lone ISRC hit is authoritative — same recording by definition,
         // even when the platforms label versions differently (TIDAL keeps
         // "Remix" in a separate field). Version guards only arbitrate
         // between multiple pressings; if they exclude everything, fall back
         // to closest-duration among the (same-recording) candidates.
-        if (candidates.length === 1) return record(candidates[0].id, 'isrc', candidates[0].isrc);
-        if (candidates.length > 1) {
+        if (candidates?.length === 1) return record(candidates[0].id, 'isrc', candidates[0].isrc);
+        if (candidates?.length > 1) {
           const pick = pickCandidate(track, candidates) ?? closestByDuration(track, candidates);
           if (pick) return record(pick.id, 'isrc', pick.isrc);
         }
       }
 
-      const searched = await target.searchTracks({
+      const searched = await guard('search', () => target.searchTracks({
         title: track.title,
         artist: track.artists?.[0],
         album: track.album,
-      });
-      const viable = searched.filter((c) => fallbackMatches(track, c));
-      const pick = pickCandidate(track, viable);
-      if (pick) return record(pick.id, 'fallback', pick.isrc);
+      }));
+      if (searched) {
+        const viable = searched.filter((c) => fallbackMatches(track, c));
+        const pick = pickCandidate(track, viable);
+        if (pick) return record(pick.id, 'fallback', pick.isrc);
+      }
 
-      const reason = track.isrc ? 'no-match-on-target' : 'no-isrc-and-no-metadata-match';
+      if (lookupFailed) {
+        log.info('unmatched track (lookup error, will retry next run)', { key, title: track.title });
+        return { unmatched: true, reason: 'lookup-failed', transient: true };
+      }
+
+      const reason = isrc ? 'no-match-on-target' : 'no-usable-isrc-and-no-metadata-match';
       state.data.failures[key] = {
         reason,
         failedAtRun: state.data.runCount,

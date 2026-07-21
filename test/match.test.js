@@ -8,7 +8,7 @@ import { createStateStore } from '../src/state.js';
 import { silentLogger, tmpDir } from './helpers.js';
 
 const track = (over = {}) => ({
-  id: 'm1', isrc: 'ISRC1', title: 'Song Title', version: null,
+  id: 'm1', isrc: 'USRC17607839', title: 'Song Title', version: null,
   artists: ['Some Artist'], album: 'The Album', durationMs: 200000, isLocal: false, ...over,
 });
 
@@ -77,7 +77,7 @@ test('isrc match is cached; second call skips the API', async () => {
   const second = await matcher.matchTrack(track(), 'spotify', 'tidal');
   assert.deepEqual(second, { matchedId: 's9', matchedBy: 'isrc' });
   assert.equal(calls.isrc, 1);
-  assert.equal(state.data.mappings['spotify:m1'].isrc, 'ISRC1');
+  assert.equal(state.data.mappings['spotify:m1'].isrc, 'USRC17607839');
 });
 
 test('falls back to metadata search when isrc misses', async () => {
@@ -128,4 +128,64 @@ test('successful match records the reverse mapping for two-way cache hits', asyn
   await matcher.matchTrack(track(), 'spotify', 'tidal');
   assert.equal(state.data.mappings['spotify:m1'].matchedId, 't42');
   assert.equal(state.data.mappings['tidal:t42'].matchedId, 'm1');
+});
+
+test('normalizeIsrc uppercases, strips separators, rejects malformed', async () => {
+  const { normalizeIsrc } = await import('../src/match.js');
+  assert.equal(normalizeIsrc('uscgh2229370'), 'USCGH2229370');
+  assert.equal(normalizeIsrc('US-CGH-22-29370'), 'USCGH2229370');
+  assert.equal(normalizeIsrc('bxg6r1900639'), 'BXG6R1900639');
+  assert.equal(normalizeIsrc('too-short'), null);
+  assert.equal(normalizeIsrc(''), null);
+  assert.equal(normalizeIsrc(null), null);
+});
+
+test('lowercase source ISRC is normalized before the lookup call', async () => {
+  const state = createStateStore(tmpDir());
+  const seen = [];
+  const tidal = {
+    findTracksByIsrc: async (isrc) => { seen.push(isrc); return [{ id: 't1', title: 'Song Title', isrc, durationMs: 200000 }]; },
+    searchTracks: async () => [],
+  };
+  const matcher = createMatcher({ adapters: { tidal }, state, logger: silentLogger, retryRuns: 10 });
+  const result = await matcher.matchTrack(track({ isrc: 'uscgh2229370' }), 'spotify', 'tidal');
+  assert.deepEqual(seen, ['USCGH2229370']);
+  assert.equal(result.matchedId, 't1');
+  assert.equal(state.data.mappings['spotify:m1'].isrc, 'USCGH2229370');
+});
+
+test('ISRC lookup error falls back to search instead of failing the pair', async () => {
+  const state = createStateStore(tmpDir());
+  const tidal = {
+    findTracksByIsrc: async () => { const e = new Error('tidal API error 400 (GENERIC_REQUEST_ERROR)'); throw e; },
+    searchTracks: async () => [{ id: 'via-search', title: 'Song Title', artists: ['Some Artist'], durationMs: 200000 }],
+  };
+  const matcher = createMatcher({ adapters: { tidal }, state, logger: silentLogger, retryRuns: 10 });
+  const result = await matcher.matchTrack(track(), 'spotify', 'tidal');
+  assert.deepEqual(result, { matchedId: 'via-search', matchedBy: 'fallback' });
+});
+
+test('total lookup failure is transient: reported unmatched but NOT failure-cached', async () => {
+  const state = createStateStore(tmpDir());
+  let calls = 0;
+  const tidal = {
+    findTracksByIsrc: async () => { calls++; throw new Error('400'); },
+    searchTracks: async () => { throw new Error('400'); },
+  };
+  const matcher = createMatcher({ adapters: { tidal }, state, logger: silentLogger, retryRuns: 10 });
+  const first = await matcher.matchTrack(track(), 'spotify', 'tidal');
+  assert.equal(first.unmatched, true);
+  assert.equal(first.reason, 'lookup-failed');
+  assert.equal(first.transient, true);
+  assert.deepEqual(state.data.failures, {}, 'transient errors must not poison the retry cache');
+  await matcher.matchTrack(track(), 'spotify', 'tidal');
+  assert.equal(calls, 2, 'retried immediately on the next attempt, no cache cooldown');
+});
+
+test('AuthRequiredError still propagates out of lookups', async () => {
+  const { AuthRequiredError } = await import('../src/http.js');
+  const state = createStateStore(tmpDir());
+  const tidal = { findTracksByIsrc: async () => { throw new AuthRequiredError('tidal'); }, searchTracks: async () => [] };
+  const matcher = createMatcher({ adapters: { tidal }, state, logger: silentLogger, retryRuns: 10 });
+  await assert.rejects(() => matcher.matchTrack(track(), 'spotify', 'tidal'), AuthRequiredError);
 });

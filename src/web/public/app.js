@@ -293,14 +293,14 @@ function pairRow(pair) {
     ({ progress, chip } = progressCells(live.matched, live.total, live.unmatched, { done: false }));
     when = 'now';
   } else if (live?.status === 'failed') {
-    chip = h('span', { class: 'chip err' }, 'failed');
+    chip = h('span', { class: 'chip err', title: r?.error ?? '' }, 'failed');
     progress = h('span', { class: 'small muted' }, 'see logs');
   } else if (live && live.status !== 'skipped') {
     // Finished earlier in the still-running batch — show its fresh result.
     ({ progress, chip } = progressCells(live.matched, live.total, live.unmatched, { status: live.status }));
     when = 'just now';
   } else if (r?.status === 'failed') {
-    chip = h('span', { class: 'chip err' }, 'failed');
+    chip = h('span', { class: 'chip err', title: r.error ?? '' }, 'failed');
     progress = h('span', { class: 'small muted' }, 'see logs');
   } else if (r) {
     ({ progress, chip } = progressCells(r.matched, r.total || 0, r.unmatched, { status: r.status }));
@@ -397,12 +397,25 @@ function wizardShell(stepNo, content, footer) {
   );
 }
 
-function wizNav({ back = true, nextLabel = 'Continue', nextDisabled = false, onNext }) {
+// Inputs update wiz state WITHOUT re-rendering (a repaint would eat focus),
+// so the Next button recomputes its own disabled state via updateWizNext().
+let wizNextRef = { btn: null, compute: null };
+const updateWizNext = () => {
+  if (wizNextRef.btn && wizNextRef.compute) wizNextRef.btn.disabled = Boolean(wizNextRef.compute());
+};
+
+function wizNav({ back = true, nextLabel = 'Continue', nextDisabled = false, computeDisabled = null, onNext }) {
+  const btn = h('button', {
+    class: 'btn primary',
+    disabled: computeDisabled ? Boolean(computeDisabled()) : nextDisabled,
+    onclick: onNext,
+  }, nextLabel, icon('i-arrow'));
+  wizNextRef = { btn, compute: computeDisabled };
   return h('div', { class: 'wizfoot' },
     back
       ? h('button', { class: 'btn ghost', onclick: () => { wiz.step -= 1; saveWiz(wiz); render(); } }, 'Back')
       : h('span'),
-    h('button', { class: 'btn primary', disabled: nextDisabled, onclick: onNext }, nextLabel, icon('i-arrow')),
+    btn,
   );
 }
 
@@ -415,9 +428,9 @@ function credsFields(platform, uri) {
     h('h3', { style: 'margin:14px 0 8px' }, PLATFORM_LABEL[platform]),
     h('div', { class: 'formrow' },
       h('label', { class: 'field' }, h('span', {}, 'Client ID'),
-        h('input', { type: 'text', value: c.clientId, oninput: (e) => { c.clientId = e.target.value.trim(); saveWiz(wiz); } })),
+        h('input', { type: 'text', value: c.clientId, oninput: (e) => { c.clientId = e.target.value.trim(); saveWiz(wiz); updateWizNext(); } })),
       h('label', { class: 'field' }, h('span', {}, 'Client secret'),
-        h('input', { type: 'password', value: c.clientSecret, oninput: (e) => { c.clientSecret = e.target.value.trim(); saveWiz(wiz); } })),
+        h('input', { type: 'password', value: c.clientSecret, oninput: (e) => { c.clientSecret = e.target.value.trim(); saveWiz(wiz); updateWizNext(); } })),
     ),
     h('div', { class: 'small muted' }, 'Redirect URI to add in the app settings:'),
     h('div', { class: 'codebox' }, uri,
@@ -431,7 +444,7 @@ function credsFields(platform, uri) {
 
 function wizStep1() {
   const uris = state.settings?.redirectUris ?? { spotify: '…', tidal: '…' };
-  const filled = ['spotify', 'tidal'].every((p) => (wiz.creds[p].clientId || state.settings?.[p]?.clientId)
+  const filled = () => ['spotify', 'tidal'].every((p) => (wiz.creds[p].clientId || state.settings?.[p]?.clientId)
     && (wiz.creds[p].clientSecret || state.settings?.[p]?.clientSecretSet));
   return wizardShell(1,
     h('div', {},
@@ -447,7 +460,7 @@ function wizStep1() {
     ),
     wizNav({
       back: false,
-      nextDisabled: !filled,
+      computeDisabled: () => !filled(),
       onNext: async () => {
         try {
           await api('/api/settings', { method: 'PUT', body: {
@@ -543,6 +556,7 @@ function wizStep4() {
               if (e.target.checked) wiz.picks.push({ primaryId: p.id, secondaryId: null, name: p.name });
               else wiz.picks = wiz.picks.filter((x) => x.primaryId !== p.id);
               saveWiz(wiz);
+              updateWizNext();
             },
           }),
           h('span', {}, p.name),
@@ -564,7 +578,7 @@ function wizStep4() {
       wiz.all ? null : listBox,
     ),
     wizNav({
-      nextDisabled: !wiz.all && wiz.picks.length === 0,
+      computeDisabled: () => !wiz.all && wiz.picks.length === 0,
       onNext: () => { wiz.step = 5; saveWiz(wiz); render(); },
     }));
 }
@@ -624,6 +638,71 @@ function setupView() {
 }
 
 // ---- settings ----
+let pairsBeforeAll = null; // remembers the explicit selection while "all" is toggled on
+
+function settingsPlaylistPicker(draft) {
+  const platform = draft.sync.mode === 'two-way' ? 'spotify' : (draft.sync.source ?? 'spotify');
+  const isAll = draft.sync.pairs === 'all';
+  const picks = () => (Array.isArray(draft.sync.pairs) ? draft.sync.pairs : []);
+
+  const listBox = h('div', { class: 'listpick' }, h('p', { class: 'small muted' }, 'Loading playlists…'));
+  const fill = (playlists) => {
+    listBox.replaceChildren(
+      ...(playlists.length === 0 ? [h('p', { class: 'small muted' }, 'No playlists found on this account.')] : []),
+      ...playlists.map((p) => h('label', { class: 'checkline' },
+        h('input', {
+          type: 'checkbox',
+          checked: picks().some((x) => x.primaryId === p.id),
+          onchange: (e) => {
+            // secondaryId stays null: the engine reuses the counterpart it
+            // already created for this playlist (tracked in state by id).
+            const current = picks();
+            draft.sync.pairs = e.target.checked
+              ? [...current, { primaryId: p.id, secondaryId: null, name: p.name }]
+              : current.filter((x) => x.primaryId !== p.id);
+          },
+        }),
+        h('span', {}, p.name),
+        p.count !== null && h('span', { class: 'small muted num' }, `${p.count} tracks`),
+      )),
+    );
+  };
+  if (!isAll) {
+    const cached = state.playlistCache[platform];
+    if (cached) fill(cached);
+    else {
+      api(`/api/playlists/${platform}`)
+        .then(({ playlists }) => {
+          state.playlistCache[platform] = playlists;
+          fill(playlists);
+        })
+        .catch((err) => listBox.replaceChildren(h('p', { class: 'small muted' }, err.message)));
+    }
+  }
+
+  return h('div', { style: 'margin-top:4px' },
+    h('label', { class: 'field' }, h('span', {}, 'Playlists'),
+      h('span', { class: 'hint' }, `Synced from the ${PLATFORM_LABEL[platform]} account. Unselecting stops syncing a playlist; already-created counterparts stay where they are.`)),
+    h('label', { class: 'checkline' },
+      h('input', {
+        type: 'checkbox',
+        checked: isAll,
+        onchange: (e) => {
+          if (e.target.checked) {
+            pairsBeforeAll = picks();
+            draft.sync.pairs = 'all';
+          } else {
+            draft.sync.pairs = pairsBeforeAll ?? [];
+            pairsBeforeAll = null;
+          }
+          render();
+        },
+      }),
+      h('span', {}, `All playlists owned by the ${PLATFORM_LABEL[platform]} account (including future ones)`)),
+    isAll ? null : listBox,
+  );
+}
+
 function settingsView() {
   const s = state.settings;
   if (!s) {
@@ -647,10 +726,6 @@ function settingsView() {
   const check = (label, get, set) => h('label', { class: 'checkline' },
     h('input', { type: 'checkbox', checked: get(), onchange: (e) => set(e.target.checked) }), h('span', {}, label));
 
-  const pairsSummary = s.sync.pairs === 'all'
-    ? 'All playlists'
-    : `${s.sync.pairs.length} selected`;
-
   return h('div', { class: 'shell' },
     topbar('settings'),
     h('h1', { style: 'margin-bottom:16px' }, 'Settings'),
@@ -669,15 +744,15 @@ function settingsView() {
     h('div', { class: 'card' },
       h('h2', { style: 'margin-bottom:12px' }, 'Sync'),
       h('div', { class: 'formrow' },
-        field('Mode', h('select', { onchange: (e) => { draft.sync.mode = e.target.value; } },
+        field('Mode', h('select', { onchange: (e) => { draft.sync.mode = e.target.value; render(); } },
           h('option', { value: 'one-way', selected: draft.sync.mode === 'one-way' }, 'One-way mirror'),
           h('option', { value: 'two-way', selected: draft.sync.mode === 'two-way' }, 'Two-way sync'))),
-        field('Source (one-way)', h('select', { onchange: (e) => { draft.sync.source = e.target.value; } },
+        field('Source (one-way)', h('select', { onchange: (e) => { draft.sync.source = e.target.value; render(); } },
           h('option', { value: 'spotify', selected: draft.sync.source === 'spotify' }, 'Spotify → TIDAL'),
           h('option', { value: 'tidal', selected: draft.sync.source === 'tidal' }, 'TIDAL → Spotify'))),
         field('Schedule (cron)', text(() => draft.sync.cron, (v) => { draft.sync.cron = v; }), 'Only used while periodic sync is on'),
-        field('Playlists', h('input', { type: 'text', value: pairsSummary, disabled: true }), 'Re-run the setup wizard below to change the selection'),
       ),
+      settingsPlaylistPicker(draft),
       check('Periodic sync', () => draft.sync.periodic, (v) => { draft.sync.periodic = v; }),
       check('Sync when the service starts', () => draft.sync.onStart, (v) => { draft.sync.onStart = v; }),
       check('Dry-run (log changes, write nothing)', () => draft.sync.dryRun, (v) => { draft.sync.dryRun = v; }),

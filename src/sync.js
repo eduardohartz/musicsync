@@ -74,6 +74,7 @@ export function createSyncEngine({
     const ps = pairState(primaryId, secondaryId);
 
     const sourceMeta = await source.getPlaylistMeta(primaryId);
+    ps.name = sourceMeta.name; // persist early so a failed pair still shows its name
     progress.update(primaryId, { name: sourceMeta.name, status: 'syncing' });
 
     let created = false;
@@ -202,6 +203,7 @@ export function createSyncEngine({
     const ps = pairState(primaryId, secondaryId); // primary = spotify in two-way
 
     const spotifyMeta = await spotify.getPlaylistMeta(ps.spotifyPlaylistId);
+    ps.name = spotifyMeta.name; // persist early so a failed pair still shows its name
     progress.update(primaryId, { name: spotifyMeta.name, status: 'syncing' });
 
     if (!ps.tidalPlaylistId) {
