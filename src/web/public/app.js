@@ -84,8 +84,12 @@ const state = {
   authDisabled: false,
   overview: null,
   settings: null,
+  settingsDraft: null, // survives re-renders; cleared on save
+  unmatchedOpen: false,
+  bootError: null,
   playlistCache: {},
   pollTimer: null,
+  lastRoute: null,
 };
 
 const WIZ_KEY = 'musicsync-wizard';
@@ -100,6 +104,8 @@ const wizDefault = () => ({
   cron: '0 */6 * * *',
   periodic: true,
   runNow: true,
+  manualUrl: '',
+  manualOpen: false,
 });
 const loadWiz = () => {
   try {
@@ -121,14 +127,21 @@ async function refreshSettings() {
   return state.settings;
 }
 
+const isEditing = () =>
+  document.activeElement && ['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName);
+
 function schedulePoll() {
   clearTimeout(state.pollTimer);
   if (!state.authed) return;
   const busy = state.overview?.syncing || (location.hash === '#/setup' && wiz.step === 2);
   state.pollTimer = setTimeout(async () => {
     try {
+      const before = JSON.stringify(state.overview);
       await refreshOverview();
-      render();
+      // Re-render only when data actually changed, and never while the user
+      // is mid-keystroke in a form control — a repaint would eat the input.
+      if (JSON.stringify(state.overview) !== before && !isEditing()) render();
+      else schedulePoll();
     } catch { /* rendered by api() on 401 */ }
   }, busy ? 3500 : 20000);
 }
@@ -258,7 +271,8 @@ function pairRow(pair) {
 async function unmatchedSection() {
   const wrap = h('div', { class: 'card' });
   const body = h('div', {}, h('p', { class: 'small muted' }, 'Loading…'));
-  const details = h('details', { class: 'unmatched', ontoggle: async () => {
+  const details = h('details', { class: 'unmatched', open: state.unmatchedOpen, ontoggle: async () => {
+    state.unmatchedOpen = details.open; // survive poll re-renders
     if (!details.open) return;
     try {
       const report = await api('/api/unmatched');
@@ -344,6 +358,9 @@ function wizNav({ back = true, nextLabel = 'Continue', nextDisabled = false, onN
 
 function credsFields(platform, uri) {
   const c = wiz.creds[platform];
+  // ENV-seeded or previously saved credentials pre-fill the wizard, so a
+  // pre-provisioned install (or a resumed session) isn't blocked on retyping.
+  if (!c.clientId && state.settings?.[platform]?.clientId) c.clientId = state.settings[platform].clientId;
   return h('div', {},
     h('h3', { style: 'margin:14px 0 8px' }, PLATFORM_LABEL[platform]),
     h('div', { class: 'formrow' },
@@ -364,7 +381,7 @@ function credsFields(platform, uri) {
 
 function wizStep1() {
   const uris = state.settings?.redirectUris ?? { spotify: '…', tidal: '…' };
-  const filled = ['spotify', 'tidal'].every((p) => wiz.creds[p].clientId
+  const filled = ['spotify', 'tidal'].every((p) => (wiz.creds[p].clientId || state.settings?.[p]?.clientId)
     && (wiz.creds[p].clientSecret || state.settings?.[p]?.clientSecretSet));
   return wizardShell(1,
     h('div', {},
@@ -407,14 +424,20 @@ function wizStep2() {
         : h('a', { class: 'btn primary', href: `/auth/${platform}` }, 'Connect'),
     );
   };
-  const manualInput = h('input', { type: 'text', placeholder: 'http://127.0.0.1:…/callback/…?code=…' });
+  // Persisted in wiz so the 3.5s connect-status poll can't wipe a pasted URL.
+  const manualInput = h('input', {
+    type: 'text',
+    placeholder: 'http://127.0.0.1:…/callback/…?code=…',
+    value: wiz.manualUrl,
+    oninput: (e) => { wiz.manualUrl = e.target.value; saveWiz(wiz); },
+  });
   const both = conns.spotify.connected && conns.tidal.connected;
   return wizardShell(2,
     h('div', {},
       h('h1', {}, 'Connect your accounts'),
       h('p', { class: 'lead' }, 'Approve access on both platforms. You’ll be sent back here after each one.'),
       h('div', { class: 'connectpair' }, card('spotify'), h('div', { class: 'loop' }, logoMark(26)), card('tidal')),
-      h('details', { class: 'small' },
+      h('details', { class: 'small', open: wiz.manualOpen, ontoggle: (e) => { wiz.manualOpen = e.target.open; saveWiz(wiz); } },
         h('summary', { class: 'muted' }, 'Browser can’t reach this server? Paste the redirect URL instead'),
         h('div', { style: 'display:flex;gap:8px;margin-top:8px' },
           manualInput,
@@ -422,7 +445,8 @@ function wizStep2() {
             try {
               const res = await api('/api/auth/manual', { method: 'POST', body: { url: manualInput.value } });
               toast(`${PLATFORM_LABEL[res.platform]} connected`, 'ok');
-              manualInput.value = '';
+              wiz.manualUrl = '';
+              saveWiz(wiz);
               await refreshOverview();
               render();
             } catch (err) { toast(err.message, 'err'); }
@@ -523,6 +547,7 @@ function wizStep5() {
       nextLabel: 'Finish setup',
       onNext: async () => {
         try {
+          const ranNow = wiz.runNow;
           await api('/api/settings', { method: 'PUT', body: { sync: {
             mode: wiz.mode,
             source: wiz.mode === 'one-way' ? wiz.source : null,
@@ -531,10 +556,10 @@ function wizStep5() {
             cron: wiz.cron,
             onStart: wiz.periodic,
           } } });
-          await api('/api/setup/complete', { method: 'POST', body: { runNow: wiz.runNow } });
+          await api('/api/setup/complete', { method: 'POST', body: { runNow: ranNow } });
           localStorage.removeItem(WIZ_KEY);
           wiz = wizDefault();
-          toast(wiz.runNow ? 'Setup complete — first sync started' : 'Setup complete', 'ok');
+          toast(ranNow ? 'Setup complete — first sync started' : 'Setup complete', 'ok');
           await refreshOverview();
           location.hash = '#/';
           render();
@@ -555,12 +580,17 @@ function settingsView() {
     refreshSettings().then(render).catch((err) => toast(err.message, 'err'));
     return h('div', { class: 'shell' }, topbar('settings'), h('div', { class: 'card' }, h('p', { class: 'muted' }, 'Loading…')));
   }
-  const draft = {
+  // The draft lives in module state so poll-triggered re-renders can't wipe
+  // in-progress edits; it is rebuilt only after a successful save.
+  state.settingsDraft ??= {
     spotify: { clientId: s.spotify.clientId, clientSecret: '', market: s.spotify.market, playlistPublic: s.spotify.playlistPublic },
     tidal: { clientId: s.tidal.clientId, clientSecret: '', accessType: s.tidal.accessType },
-    sync: { ...s.sync },
+    // A two-way config has source=null; the select would silently DISPLAY
+    // "Spotify" while committing null — default the draft to what is shown.
+    sync: { ...s.sync, source: s.sync.source ?? 'spotify' },
     logLevel: s.logLevel,
   };
+  const draft = state.settingsDraft;
   const field = (label, input, hint) => h('label', { class: 'field' }, h('span', {}, label), input, hint ? h('span', { class: 'hint' }, hint) : null);
   const text = (get, set, type = 'text', placeholder = '') =>
     h('input', { type, value: get(), placeholder, oninput: (e) => set(e.target.value) });
@@ -579,9 +609,9 @@ function settingsView() {
       h('h2', { style: 'margin-bottom:12px' }, 'API credentials'),
       h('div', { class: 'formrow' },
         field('Spotify client ID', text(() => draft.spotify.clientId, (v) => { draft.spotify.clientId = v; })),
-        field('Spotify client secret', text(() => '', (v) => { draft.spotify.clientSecret = v; }, 'password', s.spotify.clientSecretSet ? '•••••• (saved — leave blank to keep)' : '')),
+        field('Spotify client secret', text(() => draft.spotify.clientSecret, (v) => { draft.spotify.clientSecret = v; }, 'password', s.spotify.clientSecretSet ? '•••••• (saved — leave blank to keep)' : '')),
         field('TIDAL client ID', text(() => draft.tidal.clientId, (v) => { draft.tidal.clientId = v; })),
-        field('TIDAL client secret', text(() => '', (v) => { draft.tidal.clientSecret = v; }, 'password', s.tidal.clientSecretSet ? '•••••• (saved — leave blank to keep)' : '')),
+        field('TIDAL client secret', text(() => draft.tidal.clientSecret, (v) => { draft.tidal.clientSecret = v; }, 'password', s.tidal.clientSecretSet ? '•••••• (saved — leave blank to keep)' : '')),
       ),
       h('div', { class: 'small muted' }, 'Redirect URIs: ', h('code', {}, s.redirectUris.spotify), ' · ', h('code', {}, s.redirectUris.tidal)),
     ),
@@ -621,6 +651,7 @@ function settingsView() {
       h('button', { class: 'btn primary', onclick: async () => {
         try {
           await api('/api/settings', { method: 'PUT', body: draft });
+          state.settingsDraft = null; // rebuild from saved state next render
           toast('Settings saved and applied', 'ok');
           await Promise.all([refreshSettings(), refreshOverview()]);
           render();
@@ -638,8 +669,23 @@ function settingsView() {
 }
 
 // ---------------------------------------------------------------- routing
+function errorView(message) {
+  return h('div', { class: 'login' },
+    h('div', { class: 'card' },
+      logoMark(52),
+      h('h1', {}, 'Can’t reach musicsync'),
+      h('p', { class: 'muted', style: 'margin-bottom:18px' }, message),
+      h('button', { class: 'btn primary', style: 'width:100%', onclick: () => boot() }, 'Retry'),
+    ),
+  );
+}
+
 function render() {
   clearTimeout(state.pollTimer);
+  if (state.bootError) {
+    $app.replaceChildren(errorView(state.bootError));
+    return;
+  }
   if (!state.authed && !state.authDisabled) {
     $app.replaceChildren(loginView());
     return;
@@ -649,18 +695,37 @@ function render() {
     return;
   }
   let view;
-  if (state.overview.needsSetup || location.hash === '#/setup') view = setupView();
-  else if (location.hash === '#/settings') view = settingsView();
-  else view = dashboardView();
+  let route;
+  if (state.overview.needsSetup || location.hash === '#/setup') { view = setupView(); route = 'setup'; }
+  else if (location.hash === '#/settings') { view = settingsView(); route = 'settings'; }
+  else { view = dashboardView(); route = 'dashboard'; }
   $app.replaceChildren(view);
+  // Route changes move focus to the new view's heading so keyboard and
+  // screen-reader users aren't dropped at <body> after the DOM swap.
+  if (route !== state.lastRoute && state.lastRoute !== null) {
+    const heading = $app.querySelector('h1');
+    if (heading) {
+      heading.setAttribute('tabindex', '-1');
+      heading.focus({ preventScroll: false });
+    }
+  }
+  state.lastRoute = route;
   schedulePoll();
 }
 
 window.addEventListener('hashchange', render);
 
 async function boot(checkSession = true) {
+  state.bootError = null;
   if (checkSession) {
-    const session = await api('/api/session').catch(() => ({ authed: false, authDisabled: false }));
+    let session;
+    try {
+      session = await api('/api/session');
+    } catch (err) {
+      // A transient server error must not masquerade as "logged out".
+      state.bootError = `The panel API did not respond (${err.message}).`;
+      return render();
+    }
     state.authed = session.authed || session.authDisabled;
     state.authDisabled = session.authDisabled;
     if (!state.authed) return render();
@@ -674,8 +739,18 @@ async function boot(checkSession = true) {
     history.replaceState(null, '', '/');
     if (localStorage.getItem(WIZ_KEY)) location.hash = '#/setup';
   }
-  await Promise.all([refreshOverview(), refreshSettings().catch(() => {})]);
+  try {
+    await Promise.all([refreshOverview(), refreshSettings().catch(() => {})]);
+  } catch (err) {
+    if (err.message !== 'unauthorized') {
+      state.bootError = `Loading the dashboard failed (${err.message}).`;
+    }
+    return render();
+  }
   render();
 }
 
-boot();
+boot().catch((err) => {
+  state.bootError = String(err.message ?? err);
+  render();
+});

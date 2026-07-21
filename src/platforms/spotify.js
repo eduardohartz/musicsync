@@ -188,14 +188,22 @@ export function createSpotifyAdapter({ config, tokens, logger, fetchImpl, sleep 
      * Set-style removal for two-way sync. Entries: [{id}]. Spotify's
      * remove-by-URI deletes every occurrence of the track — correct under
      * two-way's set semantics. Removal is idempotent, so retries stay on.
+     * `snapshotId` pins the delete to the playlist state the caller diffed
+     * (research §2.4); each response's snapshot_id chains into the next
+     * chunk so a concurrent user edit isn't silently clobbered.
      */
-    async removeTracks(id, entries) {
+    async removeTracks(id, entries, { snapshotId } = {}) {
+      let snapshot = snapshotId;
       for (const part of chunk(entries, 100)) {
-        await http.request(`${API}/playlists/${id}/items`, {
+        const res = await http.request(`${API}/playlists/${id}/items`, {
           method: 'DELETE',
-          json: { items: part.map((e) => ({ uri: `spotify:track:${e.id}` })) },
+          json: {
+            items: part.map((e) => ({ uri: `spotify:track:${e.id}` })),
+            ...(snapshot ? { snapshot_id: snapshot } : {}),
+          },
           auth: bearer,
         });
+        snapshot = res?.snapshot_id ?? snapshot;
       }
     },
 

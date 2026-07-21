@@ -108,6 +108,10 @@ export function createRuntime({ env = process.env } = {}) {
     if (current === 'setup') writeHealth(configDir, { status: 'SETUP', at: new Date().toISOString() });
     else if (current === 'auth_required') {
       writeHealth(configDir, { status: 'AUTH_REQUIRED', platform: authRequiredPlatform, at: new Date().toISOString() });
+    } else if (current === 'idle') {
+      // Configured + connected but no completed run yet (fresh setup,
+      // post-reconnect, manual mode): healthy, awaiting a run.
+      writeHealth(configDir, { status: 'READY', at: new Date().toISOString() });
     }
   }
 
@@ -157,6 +161,13 @@ export function createRuntime({ env = process.env } = {}) {
           log.error('musicsync keeps running but will not sync until you reconnect.');
         } else {
           lastRunError = String(err);
+          const previous = readJson(path.join(configDir, 'health.json'), null);
+          writeHealth(configDir, {
+            status: 'FAIL',
+            error: String(err),
+            at: new Date().toISOString(),
+            lastOkAt: previous?.lastOkAt ?? null,
+          });
           log.error('sync run failed', { error: String(err.stack ?? err) });
         }
       } finally {
@@ -214,6 +225,7 @@ export function createRuntime({ env = process.env } = {}) {
       writeSettings(configDir, candidateSettings);
       settings = candidateSettings;
       config = candidate;
+      logger.setLevel(config.logLevel);
       build();
       scheduleCron();
       writePhaseHealth();
@@ -226,12 +238,18 @@ export function createRuntime({ env = process.env } = {}) {
       config = loadConfig(env, settings);
       build();
       scheduleCron();
+      writePhaseHealth();
       log.info('setup completed');
     },
 
     onConnected() {
       authRequired = false;
+      authRequiredPlatform = null;
+      tokensMtimeAtAuthError = 0;
       if (ready()) scheduleCron();
+      // Clear a lingering AUTH_REQUIRED/SETUP record so the container goes
+      // healthy as soon as the account is reconnected, not a cron-interval later.
+      writePhaseHealth();
     },
 
     overview() {
@@ -306,15 +324,8 @@ export async function main() {
   const { createWebServer } = await import('./web/server.js');
   const webServer = createWebServer({ runtime, logger: runtime.logger }).start();
 
-  if (!runtime.ready()) {
-    runtime.writePhaseHealth();
-    log.info(`setup needed — open the web panel at http://127.0.0.1:${config.panel.port} to finish configuration`);
-  } else {
-    runtime.scheduleCron();
-    if (config.sync.onStart) await runtime.runOnce('startup');
-    else if (!config.sync.periodic) log.info('periodic sync is off — trigger runs from the panel');
-  }
-
+  // Register signal handlers BEFORE the (possibly long) startup sync so
+  // `docker stop` during a first big run still shuts down gracefully.
   async function shutdown(signal) {
     log.info(`${signal} received, shutting down`);
     try {
@@ -327,6 +338,16 @@ export async function main() {
   }
   process.on('SIGTERM', () => shutdown('SIGTERM'));
   process.on('SIGINT', () => shutdown('SIGINT'));
+
+  if (!runtime.ready()) {
+    runtime.writePhaseHealth();
+    log.info(`setup needed — open the web panel at http://127.0.0.1:${config.panel.port} to finish configuration`);
+  } else {
+    runtime.scheduleCron();
+    runtime.writePhaseHealth();
+    if (config.sync.onStart) await runtime.runOnce('startup');
+    else if (!config.sync.periodic) log.info('periodic sync is off — trigger runs from the panel');
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

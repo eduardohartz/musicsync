@@ -166,3 +166,22 @@ test('buildAuthorizeUrl carries scopes, state and redirect', () => {
   assert.equal(url.searchParams.get('state'), 'st1');
   assert.match(url.searchParams.get('scope'), /playlist-modify-private/);
 });
+
+test('removeTracks includes snapshot_id and chains it across chunks', async () => {
+  const bodies = [];
+  const { adapter } = makeAdapter([
+    {
+      match: (u, o) => u.endsWith('/playlists/p1/items') && o.method === 'DELETE',
+      reply: (u, o) => {
+        bodies.push(JSON.parse(o.body));
+        return { status: 200, body: { snapshot_id: `snap-${bodies.length}` } };
+      },
+    },
+  ]);
+  const entries = Array.from({ length: 150 }, (_, i) => ({ id: `t${i}` }));
+  await adapter.removeTracks('p1', entries, { snapshotId: 'snap-0' });
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[0].snapshot_id, 'snap-0');
+  assert.equal(bodies[1].snapshot_id, 'snap-1', 'second chunk must chain the returned snapshot');
+  assert.equal(bodies[0].items.length, 100);
+});

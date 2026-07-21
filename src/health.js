@@ -27,6 +27,11 @@ export function evaluateHealth(data, now = Date.now()) {
   }
   // Waiting for first-run setup in the web panel: the container is doing its job.
   if (data.status === 'SETUP') return { healthy: true };
+  // Configured and connected, no run yet (fresh setup or post-reconnect).
+  if (data.status === 'READY') return { healthy: true };
+  if (data.status === 'FAIL') {
+    return { healthy: false, reason: `last sync run failed: ${data.error ?? 'unknown error'}` };
+  }
   if (data.status !== 'OK') return { healthy: false, reason: `status is ${data.status}` };
   // Manual-only mode (periodic sync off): staleness is meaningless.
   if (data.periodic === false) return { healthy: true };

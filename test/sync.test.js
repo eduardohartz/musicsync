@@ -334,3 +334,120 @@ test('two-way: auto-creates the tidal side from a bare spotify id', async () => 
   assert.equal(state.data.pairs.sp1.tidalPlaylistId, 'tidal-of-Solo');
   assert.deepEqual(state.data.pairs.sp1.baseline, [{ spotify: 'a', tidal: 's-a' }]);
 });
+
+test('two-way: shared-ISRC duplicate removal does not cascade-delete (removal rescue)', async () => {
+  // S1 and S2 both map to T1. Baseline knows only {S1,T1}. User deletes S1.
+  const { engine, state, calls } = makeWorld({
+    mode: 'two-way',
+    pairs: [{ primaryId: 'sp1', secondaryId: 'td1' }],
+    spotifyLists: { sp1: { name: 'L', changeToken: 'v2', items: [mTrack('S2')] } },
+    tidalLists: { td1: { name: 'L', changeToken: 'w2', items: [mTrack('T1', { itemId: 'it1' })] } },
+    matcherMap: { S2: { matchedId: 'T1', matchedBy: 'isrc' } },
+  });
+  state.data.pairs.sp1 = {
+    spotifyPlaylistId: 'sp1', tidalPlaylistId: 'td1',
+    spotifyChangeToken: 'old', tidalChangeToken: 'old', unmatchedCount: 0,
+    baseline: [{ spotify: 'S1', tidal: 'T1' }],
+  };
+  await engine.runSync();
+  assert.equal(calls.removes.length, 0, 'T1 must be rescued — S2 still maps to it');
+  assert.deepEqual(state.data.pairs.sp1.baseline, [{ spotify: 'S2', tidal: 'T1' }]);
+});
+
+test('two-way: one id never enters two baseline pairs (covered on both sides)', async () => {
+  // S1 (new on spotify) matches T5; T9 (new on tidal) also matches S1.
+  const { engine, state } = makeWorld({
+    mode: 'two-way',
+    pairs: [{ primaryId: 'sp1', secondaryId: 'td1' }],
+    spotifyLists: { sp1: { name: 'L', changeToken: 'v2', items: [mTrack('S1')] } },
+    tidalLists: { td1: { name: 'L', changeToken: 'w2', items: [mTrack('T9', { itemId: 'it9' })] } },
+    matcherMap: {
+      S1: { matchedId: 'T5', matchedBy: 'isrc' },
+      T9: { matchedId: 'S1', matchedBy: 'isrc' },
+    },
+  });
+  state.data.pairs.sp1 = {
+    spotifyPlaylistId: 'sp1', tidalPlaylistId: 'td1',
+    spotifyChangeToken: 'old', tidalChangeToken: 'old', unmatchedCount: 0, baseline: [],
+  };
+  await engine.runSync();
+  const baseline = state.data.pairs.sp1.baseline;
+  const spotifyIds = baseline.map((p) => p.spotify);
+  assert.equal(new Set(spotifyIds).size, spotifyIds.length, `duplicate spotify id in baseline: ${JSON.stringify(baseline)}`);
+  const tidalIds = baseline.map((p) => p.tidal);
+  assert.equal(new Set(tidalIds).size, tidalIds.length, 'duplicate tidal id in baseline');
+});
+
+test('two-way: re-pointing the pair to another playlist resets baseline (no mass delete)', async () => {
+  const { engine, state, calls } = makeWorld({
+    mode: 'two-way',
+    pairs: [{ primaryId: 'sp1', secondaryId: 'tdB' }],
+    spotifyLists: { sp1: { name: 'L', changeToken: 'v9', items: [mTrack('a'), mTrack('b')] } },
+    tidalLists: { tdB: { name: 'Other', changeToken: 'w1', items: [] } },
+  });
+  state.data.pairs.sp1 = {
+    spotifyPlaylistId: 'sp1', tidalPlaylistId: 'tdA',
+    spotifyChangeToken: 'v9', tidalChangeToken: 'stale', unmatchedCount: 0,
+    baseline: [{ spotify: 'x1', tidal: 'y1' }, { spotify: 'x2', tidal: 'y2' }],
+  };
+  await engine.runSync();
+  assert.equal(calls.removes.length, 0, 're-pointed pair must merge, never remove');
+  assert.equal(state.data.pairs.sp1.tidalPlaylistId, 'tdB');
+  assert.deepEqual(calls.adds[0], { platform: 'tidal', id: 'tdB', trackIds: ['s-a', 's-b'] });
+});
+
+test('two-way: dropped tidal adds leave the tidal change token stale for retry', async () => {
+  const world = makeWorld({
+    mode: 'two-way',
+    pairs: [{ primaryId: 'sp1', secondaryId: 'td1' }],
+    spotifyLists: { sp1: { name: 'L', changeToken: 'v2', items: [mTrack('a'), mTrack('p')] } },
+    tidalLists: { td1: { name: 'L', changeToken: 'w2', items: [mTrack('s-a')] } },
+  });
+  world.state.data.pairs.sp1 = {
+    spotifyPlaylistId: 'sp1', tidalPlaylistId: 'td1',
+    spotifyChangeToken: 'old', tidalChangeToken: 'old', unmatchedCount: 0,
+    baseline: [{ spotify: 'a', tidal: 's-a' }],
+  };
+  world.adapters.tidal.addTracks = async () => ({ absent: ['s-p'] });
+  await world.engine.runSync();
+  const ps = world.state.data.pairs.sp1;
+  assert.equal(ps.tidalChangeToken, undefined, 'token must stay stale so the drop is retried');
+  assert.equal(ps.spotifyChangeToken, 'v2', 'untouched platform keeps its pre-read token');
+});
+
+test('two-way: written platforms leave tokens stale; untouched platforms persist pre-read tokens', async () => {
+  const { engine, state } = makeWorld({
+    mode: 'two-way',
+    pairs: [{ primaryId: 'sp1', secondaryId: 'td1' }],
+    spotifyLists: { sp1: { name: 'L', changeToken: 'v2', items: [mTrack('a'), mTrack('new')] } },
+    tidalLists: { td1: { name: 'L', changeToken: 'w2', items: [mTrack('s-a')] } },
+  });
+  state.data.pairs.sp1 = {
+    spotifyPlaylistId: 'sp1', tidalPlaylistId: 'td1',
+    spotifyChangeToken: 'old', tidalChangeToken: 'old', unmatchedCount: 0,
+    baseline: [{ spotify: 'a', tidal: 's-a' }],
+  };
+  await engine.runSync();
+  const ps = state.data.pairs.sp1;
+  assert.equal(ps.spotifyChangeToken, 'v2', 'spotify untouched — pre-read token persisted');
+  assert.equal(ps.tidalChangeToken, undefined, 'tidal was written — token left stale');
+});
+
+test('two-way: spotify removals carry the snapshot guard from the pre-read meta', async () => {
+  const removeArgs = [];
+  const world = makeWorld({
+    mode: 'two-way',
+    pairs: [{ primaryId: 'sp1', secondaryId: 'td1' }],
+    spotifyLists: { sp1: { name: 'L', changeToken: 'snap-42', items: [mTrack('a'), mTrack('gone')] } },
+    tidalLists: { td1: { name: 'L', changeToken: 'w2', items: [mTrack('s-a')] } },
+  });
+  world.adapters.spotify.removeTracks = async (id, entries, opts) => removeArgs.push({ id, entries, opts });
+  world.state.data.pairs.sp1 = {
+    spotifyPlaylistId: 'sp1', tidalPlaylistId: 'td1',
+    spotifyChangeToken: 'old', tidalChangeToken: 'old', unmatchedCount: 0,
+    baseline: [{ spotify: 'a', tidal: 's-a' }, { spotify: 'gone', tidal: 's-gone' }],
+  };
+  await world.engine.runSync();
+  assert.equal(removeArgs.length, 1);
+  assert.deepEqual(removeArgs[0].opts, { snapshotId: 'snap-42' });
+});

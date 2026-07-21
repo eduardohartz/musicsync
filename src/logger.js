@@ -6,7 +6,7 @@ const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
  * JSON-serialized onto the line. warn/error go to stderr.
  */
 export function createLogger(level = 'info', streams = { out: process.stdout, err: process.stderr }) {
-  const threshold = LEVELS[level] ?? LEVELS.info;
+  let threshold = LEVELS[level] ?? LEVELS.info;
 
   function child(module) {
     const emit = (lvl, msg, extra) => {
@@ -23,5 +23,15 @@ export function createLogger(level = 'info', streams = { out: process.stdout, er
     };
   }
 
-  return { child, level };
+  return {
+    child,
+    get level() {
+      return Object.keys(LEVELS).find((k) => LEVELS[k] === threshold);
+    },
+    // Existing child loggers read the shared threshold, so panel-applied
+    // log-level changes take effect immediately without a restart.
+    setLevel(next) {
+      if (LEVELS[next] !== undefined) threshold = LEVELS[next];
+    },
+  };
 }

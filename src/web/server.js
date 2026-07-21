@@ -66,7 +66,11 @@ export function createWebServer({ runtime, logger }) {
       return res.status(401).json({ error: 'wrong password' });
     }
     const token = crypto.randomBytes(32).toString('hex');
-    if (sessions.size > 100) sessions.clear(); // tiny store, single user
+    // Reap expired sessions instead of clearing everything: clearing would
+    // log out every other active browser the moment the map grows.
+    for (const [t, createdAt] of sessions) {
+      if (Date.now() - createdAt > SESSION_TTL_MS) sessions.delete(t);
+    }
     sessions.set(token, Date.now());
     res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_TTL_MS / 1000}`);
     res.json({ ok: true });
@@ -124,7 +128,12 @@ export function createWebServer({ runtime, logger }) {
     log.info(`${platform} connected via panel`);
   }
 
-  app.get('/callback/:platform', requireAuth, async (req, res) => {
+  // Deliberately NOT behind requireAuth: the provider redirects here and the
+  // session cookie is host-scoped, so a user browsing via "localhost" (while
+  // redirect URIs use 127.0.0.1) would dead-end on a 401. The single-use
+  // `state` bound to a server-side pending attempt (created only by an
+  // authenticated /auth/:platform click) is the actual guard.
+  app.get('/callback/:platform', async (req, res) => {
     const { platform } = req.params;
     if (!['spotify', 'tidal'].includes(platform)) return res.status(404).send('unknown platform');
     try {

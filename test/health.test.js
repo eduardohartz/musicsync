@@ -52,3 +52,10 @@ test('SETUP phase and manual-only mode are healthy', () => {
     status: 'OK', periodic: false, lastOkAt: new Date(now - 90 * 24 * 3600_000).toISOString(),
   }, now).healthy, true, 'staleness is meaningless without periodic sync');
 });
+
+test('READY is healthy; FAIL is unhealthy with the error surfaced', () => {
+  assert.equal(evaluateHealth({ status: 'READY' }, now).healthy, true);
+  const fail = evaluateHealth({ status: 'FAIL', error: 'tidal 502' }, now);
+  assert.equal(fail.healthy, false);
+  assert.match(fail.reason, /tidal 502/);
+});

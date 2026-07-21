@@ -37,7 +37,21 @@ export function createSyncEngine({ config, adapters, state, matcher, logger }) {
   function pairState(primaryId, secondaryId) {
     const ps = (state.data.pairs[primaryId] ??= {});
     ps[playlistField(primaryPlatform)] = primaryId;
-    if (secondaryId) ps[playlistField(other(primaryPlatform))] = secondaryId;
+    const counterpartField = playlistField(other(primaryPlatform));
+    if (secondaryId) {
+      // Re-pointing a pair at a different counterpart playlist invalidates
+      // everything learned about the old one: diffing the stale baseline
+      // against the new playlist would read as mass removals on both sides.
+      if (ps[counterpartField] && ps[counterpartField] !== secondaryId) {
+        log.warn('pair re-pointed to a new playlist — resetting baseline and change tokens', {
+          primaryId, from: ps[counterpartField], to: secondaryId,
+        });
+        delete ps.baseline;
+        delete ps.spotifyChangeToken;
+        delete ps.tidalChangeToken;
+      }
+      ps[counterpartField] = secondaryId;
+    }
     return ps;
   }
 
@@ -140,9 +154,17 @@ export function createSyncEngine({ config, adapters, state, matcher, logger }) {
   }
 
   // ---------------------------------------------------------------- two-way
-  async function matchNewTracks({ ids, byId, fromPlatform, presentOnTarget, coveredOnTarget, pairs, adds, unmatched, playlistName }) {
+  /**
+   * Match one side's new tracks against the other. `covered` holds the ids
+   * already consumed by a baseline pair or a pair formed this run — on BOTH
+   * platforms. Skipping covered ids on either side keeps every id in at most
+   * one pair; a duplicated id in the baseline would later read as a removal
+   * of a track the user still wants.
+   */
+  async function matchNewTracks({ ids, byId, fromPlatform, presentOnTarget, covered, pairs, adds, unmatched, playlistName }) {
     const toPlatform = other(fromPlatform);
     for (const id of ids) {
+      if (covered[fromPlatform].has(id)) continue; // already in a pair formed from the other side
       const track = byId.get(id);
       const result = await matcher.matchTrack(track, fromPlatform, toPlatform);
       if (!result.matchedId) {
@@ -152,8 +174,9 @@ export function createSyncEngine({ config, adapters, state, matcher, logger }) {
         });
         continue;
       }
-      if (coveredOnTarget.has(result.matchedId)) continue; // pair already formed from the other side
-      coveredOnTarget.add(result.matchedId);
+      if (covered[toPlatform].has(result.matchedId)) continue; // counterpart already paired
+      covered[fromPlatform].add(id);
+      covered[toPlatform].add(result.matchedId);
       const pair = fromPlatform === 'spotify'
         ? { spotify: id, tidal: result.matchedId }
         : { spotify: result.matchedId, tidal: id };
@@ -201,28 +224,38 @@ export function createSyncEngine({ config, adapters, state, matcher, logger }) {
 
     const ops = computeTwoWayOps({ baseline: ps.baseline ?? [], spotifyIds, tidalIds });
     const firstRun = !ps.baseline;
-    // First run has no baseline: merge only — everything is "new", nothing
-    // is removed.
-    const removeFromSpotify = firstRun ? [] : ops.removeFromSpotify;
-    const removeFromTidal = firstRun ? [] : ops.removeFromTidal;
 
     const pairs = [...ops.keep];
     const addPairsToTidal = [];
     const addPairsToSpotify = [];
     const unmatched = [];
-    const coveredTidal = new Set(pairs.map((p) => p.tidal));
-    const coveredSpotify = new Set(pairs.map((p) => p.spotify));
+    const covered = {
+      spotify: new Set(pairs.map((p) => p.spotify)),
+      tidal: new Set(pairs.map((p) => p.tidal)),
+    };
 
     await matchNewTracks({
       ids: ops.newOnSpotify, byId: spotifyById, fromPlatform: 'spotify',
-      presentOnTarget: new Set(tidalIds), coveredOnTarget: coveredTidal,
+      presentOnTarget: new Set(tidalIds), covered,
       pairs, adds: addPairsToTidal, unmatched, playlistName: spotifyMeta.name,
     });
     await matchNewTracks({
-      ids: ops.newOnTidal.filter((id) => !coveredTidal.has(id)), byId: tidalById, fromPlatform: 'tidal',
-      presentOnTarget: new Set(spotifyIds), coveredOnTarget: coveredSpotify,
+      ids: ops.newOnTidal, byId: tidalById, fromPlatform: 'tidal',
+      presentOnTarget: new Set(spotifyIds), covered,
       pairs, adds: addPairsToSpotify, unmatched, playlistName: spotifyMeta.name,
     });
+
+    // First run has no baseline: merge only — everything is "new", nothing
+    // is removed. On later runs, rescue removals whose counterpart id was
+    // claimed by a pair formed THIS run: with shared-ISRC duplicates, the
+    // deleted copy's counterpart may still be wanted by a surviving track,
+    // and removing it would cascade into deleting the track everywhere.
+    const wanted = {
+      spotify: new Set([...pairs, ...addPairsToTidal, ...addPairsToSpotify].map((p) => p.spotify)),
+      tidal: new Set([...pairs, ...addPairsToTidal, ...addPairsToSpotify].map((p) => p.tidal)),
+    };
+    const removeFromSpotify = firstRun ? [] : ops.removeFromSpotify.filter((p) => !wanted.spotify.has(p.spotify));
+    const removeFromTidal = firstRun ? [] : ops.removeFromTidal.filter((p) => !wanted.tidal.has(p.tidal));
 
     if (config.sync.dryRun) {
       log.info('[dry-run] two-way plan', {
@@ -236,8 +269,15 @@ export function createSyncEngine({ config, adapters, state, matcher, logger }) {
       });
     }
 
+    let droppedAdds = 0;
     if (removeFromSpotify.length > 0) {
-      await spotify.removeTracks(ps.spotifyPlaylistId, removeFromSpotify.map((p) => ({ id: p.spotify })));
+      // snapshot_id pins the removal to the state the diff was computed
+      // from, so a track the user re-adds mid-run survives.
+      await spotify.removeTracks(
+        ps.spotifyPlaylistId,
+        removeFromSpotify.map((p) => ({ id: p.spotify })),
+        { snapshotId: spotifyMeta.changeToken },
+      );
       log.info('removed from spotify (removed on tidal)', { primaryId, count: removeFromSpotify.length });
     }
     if (removeFromTidal.length > 0) {
@@ -250,6 +290,7 @@ export function createSyncEngine({ config, adapters, state, matcher, logger }) {
     if (addPairsToTidal.length > 0) {
       const { absent } = await tidal.addTracks(ps.tidalPlaylistId, addPairsToTidal.map((p) => p.tidal));
       const absentSet = new Set(absent);
+      droppedAdds = absent.length;
       // Only pairs whose add actually landed enter the baseline — a pair
       // recorded without its track present would read as a removal next run.
       pairs.push(...addPairsToTidal.filter((p) => !absentSet.has(p.tidal)));
@@ -262,8 +303,18 @@ export function createSyncEngine({ config, adapters, state, matcher, logger }) {
     }
 
     ps.baseline = pairs;
-    ps.spotifyChangeToken = (await spotify.getPlaylistMeta(ps.spotifyPlaylistId)).changeToken;
-    ps.tidalChangeToken = (await tidal.getPlaylistMeta(ps.tidalPlaylistId)).changeToken;
+    // Change-token rule: a token may only be persisted if it provably covers
+    // everything this run diffed. For an untouched platform that is the
+    // PRE-read token (a mid-run user edit then re-diffs next run). For a
+    // platform we wrote to — or where adds were dropped — no such token
+    // exists, so leave it stale: the next run re-diffs and converges, at the
+    // cost of exactly one extra diff pass after each writing run.
+    const wroteSpotify = removeFromSpotify.length > 0 || addPairsToSpotify.length > 0;
+    const wroteTidal = removeFromTidal.length > 0 || addPairsToTidal.length > 0;
+    if (wroteSpotify) delete ps.spotifyChangeToken;
+    else ps.spotifyChangeToken = spotifyMeta.changeToken;
+    if (wroteTidal || droppedAdds > 0) delete ps.tidalChangeToken;
+    else ps.tidalChangeToken = tidalMeta.changeToken;
     ps.unmatchedCount = unmatched.length;
     ps.lastSyncedAt = new Date().toISOString();
 
