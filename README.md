@@ -23,14 +23,11 @@ Runs headless in Docker with a small web panel: a first-launch **setup wizard** 
 
 ### Quickstart (prebuilt image)
 
-Grab the compose file — it points at the prebuilt `ghcr.io/eduardohartz/musicsync` image (amd64 + arm64) — set your panel password, and start it:
-
 ```bash
 mkdir musicsync && cd musicsync
 curl -LO https://raw.githubusercontent.com/eduardohartz/musicsync/main/compose.yml
 curl -Lo .env https://raw.githubusercontent.com/eduardohartz/musicsync/main/.env.example
 # edit .env: set WEB_PANEL_PASSWORD (one line — that's the only required config)
-mkdir -p config             # Linux hosts: sudo chown 1000:1000 config
 docker compose up -d
 ```
 
@@ -39,7 +36,6 @@ docker compose up -d
 ```bash
 git clone https://github.com/eduardohartz/musicsync && cd musicsync
 cp .env.example .env        # set WEB_PANEL_PASSWORD
-mkdir -p config             # Linux hosts: sudo chown 1000:1000 config
 docker compose -f compose.yml -f compose.build.yml up -d --build
 ```
 

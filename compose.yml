@@ -1,16 +1,11 @@
 services:
   musicsync:
-    # Prebuilt multi-arch image (amd64/arm64), published by CI.
-    # Building from source instead? See compose.build.yml.
     image: ghcr.io/eduardohartz/musicsync:latest
     container_name: musicsync
     restart: unless-stopped
     init: true
     env_file: .env
     ports:
-      # Web panel (setup wizard, dashboard, OAuth callbacks).
       - "${PORT:-8080}:${PORT:-8080}"
     volumes:
-      # Create ./config before first run; on Linux hosts chown it to uid 1000
-      # so the container's non-root user can write it.
       - ./config:/config
