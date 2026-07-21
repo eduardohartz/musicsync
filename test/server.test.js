@@ -176,3 +176,13 @@ test('redirect URIs follow panel.appUrl (reverse-proxy support)', async () => {
   const settings = await (await fetch(`${base}/api/settings`)).json();
   assert.equal(settings.redirectUris.tidal, 'https://musicsync.example.com/callback/tidal');
 });
+
+test('static assets are served with no-cache so deploys take effect immediately', async () => {
+  const { base } = await setup({ bypass: true });
+  for (const asset of ['/app.js', '/style.css', '/']) {
+    const res = await fetch(`${base}${asset}`);
+    assert.equal(res.status, 200, asset);
+    assert.equal(res.headers.get('cache-control'), 'no-cache', asset);
+    assert.ok(res.headers.get('etag'), `${asset} keeps ETag revalidation`);
+  }
+});

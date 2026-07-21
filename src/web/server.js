@@ -226,8 +226,17 @@ export function createWebServer({ runtime, logger }) {
   });
 
   // ---- static --------------------------------------------------------------
-  app.use(express.static(PUBLIC_DIR, { index: 'index.html', maxAge: '1h' }));
-  app.get('/{*splat}', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'index.html')));
+  // No-build SPA on a tiny local server: always revalidate so UI updates
+  // show up on the next load (ETag 304s keep repeat loads cheap). An hour
+  // of browser caching here meant deploys served stale app.js.
+  app.use(express.static(PUBLIC_DIR, {
+    index: 'index.html',
+    setHeaders: (res) => res.setHeader('Cache-Control', 'no-cache'),
+  }));
+  app.get('/{*splat}', (req, res) => {
+    res.setHeader('Cache-Control', 'no-cache');
+    res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
+  });
 
   return {
     app,
