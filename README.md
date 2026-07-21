@@ -40,6 +40,8 @@ Done. The dashboard shows every playlist with its `synced / total` count and any
 
 Running without Docker (Node ≥ 22.9): set `CONFIG_DIR=./config` in `.env`, then `npm ci && npm start` — the npm scripts load `.env` automatically.
 
+Prefer a prebuilt image? CI publishes `ghcr.io/OWNER/musicsync` (amd64 + arm64) on every release — swap `build: .` for `image: ghcr.io/OWNER/musicsync:latest` in `compose.yml`.
+
 ## How the two modes behave
 
 **One-way mirror** (`SYNC_MODE=one-way`): the mirror playlist belongs to the tool — order is kept identical to the source, and any manual edits on the mirror side are overwritten on the next run.
