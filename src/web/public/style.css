@@ -113,6 +113,9 @@ a:hover { text-decoration: underline; }
 }
 .card + .card { margin-top: 14px; }
 .cardgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin-bottom: 14px; }
+/* the adjacent-sibling margin is for stacked cards; inside the grid it
+   offset every card after the first, making the first look taller */
+.cardgrid > .card + .card { margin-top: 0; }
 
 .eyebrow {
   font-size: 11.5px; font-weight: 600; letter-spacing: 0.06em;
@@ -144,6 +147,7 @@ a:hover { text-decoration: underline; }
 .bar > i { display: block; height: 100%; border-radius: 3px; background: var(--accent); transition: width 300ms ease-out; }
 .bar > i.full { background: var(--ok); }
 .chip {
+  display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
   font-size: 12px; padding: 2px 8px; border-radius: 999px;
   background: var(--surface-2); color: var(--text-2); border: 1px solid var(--border);
 }
@@ -246,6 +250,6 @@ input:focus, select:focus { border-color: var(--accent); outline: none; box-shad
 .banner.err { border-left-color: var(--err); }
 .sectionhead { display: flex; align-items: baseline; justify-content: space-between; margin: 26px 0 10px; }
 details.unmatched summary { cursor: pointer; font-weight: 560; padding: 4px 0; }
-.unmatched-item { padding: 8px 4px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; gap: 12px; }
+.unmatched-item { padding: 8px 4px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .unmatched-item:last-child { border-bottom: none; }
 .savebar { position: sticky; bottom: 0; background: var(--bg); padding: 12px 0; display: flex; gap: 10px; align-items: center; border-top: 1px solid var(--border); margin-top: 20px; }

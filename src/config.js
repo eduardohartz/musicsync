@@ -82,8 +82,12 @@ export function loadConfig(env = process.env, settings = {}) {
   // two-way has no source; pairs are just linked playlists
   const source = mode === 'one-way' ? sourceRaw : null;
 
+  const likedSongs = parseBool(pick(s.sync?.likedSongs, env.SYNC_LIKED_SONGS), 'SYNC_LIKED_SONGS', problems, false);
+  const likedSongsName = String(pick(s.sync?.likedSongsName, env.SYNC_LIKED_SONGS_NAME) ?? '').trim() || 'Spotify Liked Songs';
+
   const pairs = parsePlaylists(pick(s.sync?.pairs, env.SYNC_PLAYLISTS), problems);
-  if (pairs !== 'all' && pairs.length === 0) incomplete.push('playlist selection (SYNC_PLAYLISTS)');
+  // Liked-songs-only setups are valid: no playlist selection required then.
+  if (pairs !== 'all' && pairs.length === 0 && !likedSongs) incomplete.push('playlist selection (SYNC_PLAYLISTS)');
 
   const cron = pick(s.sync?.cron, env.SYNC_CRON) ?? '0 */6 * * *';
   if (!validateCron(cron)) problems.push(`SYNC_CRON "${cron}" is not a valid cron expression`);
@@ -142,6 +146,8 @@ export function loadConfig(env = process.env, settings = {}) {
       mode,
       source,
       pairs,
+      likedSongs,
+      likedSongsName,
       periodic,
       cron,
       onStart: parseBool(pick(s.sync?.onStart, env.SYNC_ON_START), 'SYNC_ON_START', problems, true),

@@ -20,7 +20,7 @@ const VERSION = readJson(new URL('../package.json', import.meta.url).pathname, {
 const SETTINGS_FIELDS = {
   spotify: ['clientId', 'clientSecret', 'market', 'playlistPublic'],
   tidal: ['clientId', 'clientSecret', 'accessType'],
-  sync: ['mode', 'source', 'pairs', 'periodic', 'cron', 'onStart', 'tz', 'dryRun', 'matchRetryRuns'],
+  sync: ['mode', 'source', 'pairs', 'likedSongs', 'likedSongsName', 'periodic', 'cron', 'onStart', 'tz', 'dryRun', 'matchRetryRuns'],
 };
 
 /** Keep only known fields; a blank clientSecret means "keep the stored one". */
@@ -306,6 +306,7 @@ export function createRuntime({ env = process.env } = {}) {
         // Full configured selection (with wizard-captured names) so the
         // dashboard can list every chosen playlist before its first sync.
         configuredList: config.sync.pairs === 'all' ? null : config.sync.pairs,
+        likedSongs: { enabled: config.sync.likedSongs, name: config.sync.likedSongsName },
         liveSync: liveRun,
         pairs,
         unmatchedTotal: Object.keys(state.data.failures).length,

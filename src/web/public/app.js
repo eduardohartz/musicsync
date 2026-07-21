@@ -104,6 +104,8 @@ const wizDefault = () => ({
   cron: '0 */6 * * *',
   periodic: true,
   runNow: true,
+  likedSongs: false,
+  likedName: 'Spotify Liked Songs',
   manualUrl: '',
   manualOpen: false,
 });
@@ -257,6 +259,11 @@ function buildPairList(o) {
     const existing = map.get(p.primaryId) ?? { primaryId: p.primaryId };
     map.set(p.primaryId, { ...existing, ...p, name: p.name ?? existing.name ?? null });
   }
+  if (o.likedSongs?.enabled) {
+    const id = 'spotify-liked-songs';
+    const existing = map.get(id) ?? { primaryId: id };
+    map.set(id, { ...existing, name: o.likedSongs.name ?? existing.name ?? 'Spotify Liked Songs', liked: true });
+  }
   for (const lp of o.liveSync?.pairs ?? []) {
     const existing = map.get(lp.primaryId) ?? { primaryId: lp.primaryId };
     map.set(lp.primaryId, { ...existing, name: lp.name ?? existing.name ?? null, live: lp });
@@ -281,7 +288,8 @@ function progressCells(matched, total, unmatched, { done = true, status = 'synce
 function pairRow(pair) {
   const live = pair.live;
   const r = pair.lastResult;
-  const dir = state.overview.mode === 'two-way' ? icon('i-both') : icon('i-arrow');
+  const liked = pair.liked || pair.primaryId === 'spotify-liked-songs';
+  const dir = state.overview.mode === 'two-way' && !liked ? icon('i-both') : icon('i-arrow');
   let progress = h('span', { class: 'small muted' }, 'not synced yet');
   let chip = null;
   let when = fmtRel(pair.lastSyncedAt);
@@ -307,7 +315,7 @@ function pairRow(pair) {
   }
 
   return h('div', { class: 'row' },
-    h('div', { class: 'title' }, icon('i-music'), h('span', { class: 'nm' }, pair.name ?? pair.primaryId), dir),
+    h('div', { class: 'title' }, icon(liked ? 'i-heart' : 'i-music'), h('span', { class: 'nm' }, pair.name ?? pair.primaryId), dir),
     progress,
     h('div', {}, chip, h('div', { class: 'small muted', style: 'text-align:right' }, when)),
   );
@@ -576,9 +584,17 @@ function wizStep4() {
         h('input', { type: 'checkbox', checked: wiz.all, onchange: (e) => { wiz.all = e.target.checked; saveWiz(wiz); render(); } }),
         h('span', {}, `All playlists owned by the ${PLATFORM_LABEL[platform]} account (including future ones)`)),
       wiz.all ? null : listBox,
+      h('div', { style: 'margin-top:14px;border-top:1px solid var(--border);padding-top:10px' },
+        h('label', { class: 'checkline' },
+          h('input', { type: 'checkbox', checked: wiz.likedSongs, onchange: (e) => { wiz.likedSongs = e.target.checked; saveWiz(wiz); render(); } }),
+          h('span', {}, 'Also sync your Spotify Liked Songs to a TIDAL playlist')),
+        wiz.likedSongs ? h('label', { class: 'field', style: 'margin-top:6px' },
+          h('span', {}, 'TIDAL playlist name'),
+          h('input', { type: 'text', value: wiz.likedName, oninput: (e) => { wiz.likedName = e.target.value; saveWiz(wiz); } })) : null,
+      ),
     ),
     wizNav({
-      computeDisabled: () => !wiz.all && wiz.picks.length === 0,
+      computeDisabled: () => !wiz.all && wiz.picks.length === 0 && !wiz.likedSongs,
       onNext: () => { wiz.step = 5; saveWiz(wiz); render(); },
     }));
 }
@@ -616,6 +632,8 @@ function wizStep5() {
             mode: wiz.mode,
             source: wiz.mode === 'one-way' ? wiz.source : null,
             pairs: wiz.all ? 'all' : wiz.picks,
+            likedSongs: wiz.likedSongs,
+            likedSongsName: wiz.likedName.trim() || 'Spotify Liked Songs',
             periodic: wiz.periodic,
             cron: wiz.cron,
             onStart: wiz.periodic,
@@ -756,6 +774,11 @@ function settingsView() {
       check('Periodic sync', () => draft.sync.periodic, (v) => { draft.sync.periodic = v; }),
       check('Sync when the service starts', () => draft.sync.onStart, (v) => { draft.sync.onStart = v; }),
       check('Dry-run (log changes, write nothing)', () => draft.sync.dryRun, (v) => { draft.sync.dryRun = v; }),
+      check('Sync Spotify Liked Songs to TIDAL', () => Boolean(draft.sync.likedSongs), (v) => { draft.sync.likedSongs = v; render(); }),
+      draft.sync.likedSongs ? h('div', { style: 'max-width:340px;margin-left:24px' },
+        field('Liked Songs playlist name',
+          text(() => draft.sync.likedSongsName ?? 'Spotify Liked Songs', (v) => { draft.sync.likedSongsName = v; }),
+          'Renames the TIDAL playlist on the next sync. If Spotify was connected before enabling this, reconnect it once — Liked Songs need an extra permission.')) : null,
     ),
 
     h('div', { class: 'card' },

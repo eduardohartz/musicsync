@@ -332,3 +332,16 @@ test('videos appear as pseudo-items so the diff can see them', async () => {
   assert.equal(items[1].isVideo, true);
   assert.equal(items[1].itemId, 'i2');
 });
+
+test('updatePlaylist sends a JSON:API PATCH with only given attributes', async () => {
+  let sent;
+  const { adapter } = makeAdapter([
+    usersMe,
+    {
+      match: (u, o) => u.endsWith('/playlists/pl1') && o.method === 'PATCH',
+      reply: (u, o) => { sent = JSON.parse(o.body); return { status: 204 }; },
+    },
+  ]);
+  await adapter.updatePlaylist('pl1', { name: 'New Name' });
+  assert.deepEqual(sent, { data: { type: 'playlists', id: 'pl1', attributes: { name: 'New Name' } } });
+});

@@ -1,6 +1,7 @@
 import { AuthRequiredError } from './http.js';
 import { computeWriteStrategy } from './diff.js';
 import { computeTwoWayOps } from './twoway.js';
+import { LIKED_SONGS_ID } from './platforms/spotify.js';
 
 const other = (platform) => (platform === 'spotify' ? 'tidal' : 'spotify');
 const playlistField = (platform) => `${platform}PlaylistId`;
@@ -33,15 +34,21 @@ export function createSyncEngine({
   const primaryPlatform = config.sync.mode === 'one-way' ? config.sync.source : 'spotify';
 
   async function resolvePairs() {
-    if (config.sync.pairs !== 'all') return config.sync.pairs;
-    const all = await adapters[primaryPlatform].listOwnPlaylists();
-    return all.map((p) => ({ primaryId: p.id, secondaryId: null, name: p.name }));
+    const base = config.sync.pairs === 'all'
+      ? (await adapters[primaryPlatform].listOwnPlaylists()).map((p) => ({ primaryId: p.id, secondaryId: null, name: p.name }))
+      : [...config.sync.pairs];
+    if (config.sync.likedSongs) {
+      // Liked Songs is a virtual Spotify playlist mirrored one-way into
+      // TIDAL, regardless of the main mode/source.
+      base.push({ primaryId: LIKED_SONGS_ID, secondaryId: null, name: config.sync.likedSongsName, liked: true });
+    }
+    return base;
   }
 
-  function pairState(primaryId, secondaryId) {
+  function pairState(primaryId, secondaryId, platform = primaryPlatform) {
     const ps = (state.data.pairs[primaryId] ??= {});
-    ps[playlistField(primaryPlatform)] = primaryId;
-    const counterpartField = playlistField(other(primaryPlatform));
+    ps[playlistField(platform)] = primaryId;
+    const counterpartField = playlistField(other(platform));
     if (secondaryId) {
       // Re-pointing a pair at a different counterpart playlist invalidates
       // everything learned about the old one: diffing the stale baseline
@@ -66,12 +73,14 @@ export function createSyncEngine({
   }
 
   // ---------------------------------------------------------------- one-way
-  async function syncPairOneWay({ primaryId, secondaryId }, unmatchedAll) {
-    const sourcePlatform = config.sync.source;
+  async function syncPairOneWay(pair, unmatchedAll) {
+    const { primaryId, secondaryId } = pair;
+    // The Liked Songs pair is always spotify→tidal, whatever the main config.
+    const sourcePlatform = pair.liked ? 'spotify' : config.sync.source;
     const mirrorPlatform = other(sourcePlatform);
     const source = adapters[sourcePlatform];
     const mirror = adapters[mirrorPlatform];
-    const ps = pairState(primaryId, secondaryId);
+    const ps = pairState(primaryId, secondaryId, sourcePlatform);
 
     const sourceMeta = await source.getPlaylistMeta(primaryId);
     ps.name = sourceMeta.name; // persist early so a failed pair still shows its name
@@ -94,6 +103,13 @@ export function createSyncEngine({
     const mirrorId = ps[playlistField(mirrorPlatform)];
 
     const mirrorMeta = created ? null : await mirror.getPlaylistMeta(mirrorId);
+
+    // Liked Songs mirror is renameable from the panel; follow the setting.
+    if (pair.liked && mirrorMeta && mirrorMeta.name !== sourceMeta.name) {
+      await mirror.updatePlaylist(mirrorId, { name: sourceMeta.name });
+      log.info('renamed liked-songs mirror', { mirrorId, from: mirrorMeta.name, to: sourceMeta.name });
+    }
+
     const unchanged = !created
       && ps[tokenField(sourcePlatform)] === sourceMeta.changeToken
       && ps[tokenField(mirrorPlatform)] === mirrorMeta.changeToken;
@@ -355,8 +371,9 @@ export function createSyncEngine({
   return {
     async runSync() {
       state.data.runCount += 1;
-      const syncPair = config.sync.mode === 'two-way' ? syncPairTwoWay : syncPairOneWay;
       const pairs = await resolvePairs();
+      // Per-pair dispatch: the liked pair is one-way even in two-way mode.
+      const syncPairFor = (pair) => (config.sync.mode === 'two-way' && !pair.liked ? syncPairTwoWay : syncPairOneWay);
       // Seed the live view with every pair up front so the panel shows the
       // whole queue immediately, not one playlist at a time.
       progress.runStart(pairs.map((p) => ({
@@ -368,7 +385,7 @@ export function createSyncEngine({
       try {
         for (const pair of pairs) {
           try {
-            const result = await syncPair(pair, unmatchedAll);
+            const result = await syncPairFor(pair)(pair, unmatchedAll);
             progress.update(pair.primaryId, { status: result.status, matched: result.matched ?? 0, unmatched: result.unmatched ?? 0 });
             results.push({ primaryId: pair.primaryId, ...result });
           } catch (err) {

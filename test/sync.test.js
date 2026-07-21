@@ -512,3 +512,52 @@ test('progress: failed pair reported and runEnd fires even on engine errors', as
   assert.ok(events.some(([id, s]) => id === 'boom' && s === 'failed'));
   assert.deepEqual(events.at(-1), ['end']);
 });
+
+test('liked songs: syncs spotify→tidal even when the main source is tidal', async () => {
+  const world = makeWorld({
+    source: 'tidal',
+    pairs: [],
+    spotifyLists: {
+      'spotify-liked-songs': { name: 'My Likes', changeToken: 'liked|2|t', items: [mTrack('a'), mTrack('b')] },
+    },
+  });
+  world.config.sync.likedSongs = true;
+  world.config.sync.likedSongsName = 'My Likes';
+  const summary = await world.engine.runSync();
+  assert.equal(summary.pairs.length, 1);
+  assert.equal(summary.pairs[0].status, 'synced');
+  assert.deepEqual(world.calls.created, ['tidal-of-My Likes']);
+  assert.deepEqual(world.calls.writes[0].trackIds, ['s-a', 's-b']);
+  const ps = world.state.data.pairs['spotify-liked-songs'];
+  assert.equal(ps.spotifyPlaylistId, 'spotify-liked-songs', 'liked pair keyed on the spotify side despite tidal source');
+  assert.equal(ps.tidalPlaylistId, 'tidal-of-My Likes');
+});
+
+test('liked songs: stays one-way in two-way mode and renames the mirror when the setting changes', async () => {
+  const renames = [];
+  const world = makeWorld({
+    mode: 'two-way',
+    pairs: [{ primaryId: 'sp1', secondaryId: 'td1' }],
+    spotifyLists: {
+      sp1: { name: 'L', changeToken: 'v1', items: [] },
+      'spotify-liked-songs': { name: 'Renamed Likes', changeToken: 'liked|1|t', items: [mTrack('x')] },
+    },
+    tidalLists: {
+      td1: { name: 'L', changeToken: 'w1', items: [] },
+      'liked-mirror': { name: 'Old Name', changeToken: 'lm1', items: [] },
+    },
+  });
+  world.config.sync.likedSongs = true;
+  world.config.sync.likedSongsName = 'Renamed Likes';
+  world.adapters.tidal.updatePlaylist = async (id, attrs) => renames.push([id, attrs]);
+  world.state.data.pairs['spotify-liked-songs'] = {
+    spotifyPlaylistId: 'spotify-liked-songs', tidalPlaylistId: 'liked-mirror',
+  };
+  const summary = await world.engine.runSync();
+  const liked = summary.pairs.find((p) => p.primaryId === 'spotify-liked-songs');
+  assert.equal(liked.status, 'synced');
+  assert.deepEqual(renames, [['liked-mirror', { name: 'Renamed Likes' }]]);
+  // liked pair went through the ONE-WAY path: setPlaylistItems, not add/remove
+  assert.ok(world.calls.writes.some((w) => w.id === 'liked-mirror'));
+  assert.equal(world.state.data.pairs['spotify-liked-songs'].baseline, undefined, 'one-way pairs have no two-way baseline');
+});

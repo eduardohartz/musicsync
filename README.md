@@ -47,7 +47,7 @@ Open **http://127.0.0.1:8080** and follow the setup wizard:
 1. **Credentials** — create a (free) app on each platform; the wizard shows the exact redirect URIs to paste into their dashboards. Spotify requires the app owner to have Premium; TIDAL needs the `playlists.read`, `playlists.write`, `user.read` scopes enabled.
 2. **Connect** — approve access on both platforms (OAuth runs through the panel; there's a paste-the-URL fallback for remote servers).
 3. **Mode** — one-way mirror (pick the direction) or two-way sync.
-4. **Playlists** — everything the account owns, or hand-picked.
+4. **Playlists** — everything the account owns, or hand-picked; optionally include your Spotify Liked Songs as a named TIDAL playlist.
 5. **Schedule** — presets, custom cron, or *manual only*; optionally run the first sync immediately.
 
 Done. The dashboard shows every playlist with its `synced / total` count and anything that couldn't be matched.
@@ -82,6 +82,7 @@ Everything is optional except the panel credential — setup happens in the web 
 | `SYNC_MODE` | `one-way` | `one-way` \| `two-way` |
 | `SYNC_SOURCE` | — | One-way only: `spotify` \| `tidal` — the source of truth |
 | `SYNC_PLAYLISTS` | — | `all`, or comma-separated playlist ids; `primaryId:secondaryId` links existing pairs |
+| `SYNC_LIKED_SONGS` / `SYNC_LIKED_SONGS_NAME` | `false` / `Spotify Liked Songs` | Mirror Spotify Liked Songs into a (renameable) TIDAL playlist — always Spotify→TIDAL, in any mode |
 | `SYNC_PERIODIC` | `true` | `false` = manual-only syncing |
 | `SYNC_CRON` | `0 */6 * * *` | Schedule when periodic |
 | `SYNC_ON_START` / `SYNC_TZ` / `DRY_RUN` / `LOG_LEVEL` / `MATCH_RETRY_RUNS` | | See `.env.example` |

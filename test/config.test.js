@@ -136,3 +136,23 @@ test('APP_URL overrides the redirect base and defaults to loopback:PORT', () => 
   assert.throws(() => loadConfig({ ...VALID_ENV, APP_URL: 'not a url' }), ConfigError);
   assert.throws(() => loadConfig({ ...VALID_ENV, APP_URL: 'ftp://x.example' }), ConfigError);
 });
+
+test('liked songs config: defaults, env, settings override, liked-only completeness', () => {
+  const off = loadConfig(VALID_ENV);
+  assert.equal(off.sync.likedSongs, false);
+  assert.equal(off.sync.likedSongsName, 'Spotify Liked Songs');
+
+  const on = loadConfig({ ...VALID_ENV, SYNC_LIKED_SONGS: 'true', SYNC_LIKED_SONGS_NAME: 'My Likes' });
+  assert.equal(on.sync.likedSongs, true);
+  assert.equal(on.sync.likedSongsName, 'My Likes');
+
+  const viaSettings = loadConfig(VALID_ENV, { sync: { likedSongs: true, likedSongsName: '  ' } });
+  assert.equal(viaSettings.sync.likedSongs, true);
+  assert.equal(viaSettings.sync.likedSongsName, 'Spotify Liked Songs', 'blank name falls back');
+
+  // liked-only setup: no playlist selection needed
+  const likedOnly = loadConfig({ ...VALID_ENV, SYNC_PLAYLISTS: undefined, SYNC_LIKED_SONGS: 'true' });
+  assert.ok(!likedOnly.incomplete.some((i) => i.includes('playlist selection')));
+  const neither = loadConfig({ ...VALID_ENV, SYNC_PLAYLISTS: undefined });
+  assert.ok(neither.incomplete.some((i) => i.includes('playlist selection')));
+});

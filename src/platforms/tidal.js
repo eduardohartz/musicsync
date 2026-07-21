@@ -291,6 +291,23 @@ export function createTidalAdapter({ config, tokens, logger, fetchImpl, sleep })
       return out;
     },
 
+    /** Partial update (rename etc.) — JSON:API PATCH, 204 on success. */
+    async updatePlaylist(id, { name, description }) {
+      await mutate(`${API}/playlists/${id}`, {
+        method: 'PATCH',
+        json: {
+          data: {
+            type: 'playlists',
+            id,
+            attributes: {
+              ...(name !== undefined ? { name } : {}),
+              ...(description !== undefined ? { description } : {}),
+            },
+          },
+        },
+      });
+    },
+
     async createPlaylist({ name, description }) {
       const res = await mutate(`${API}/playlists`, {
         method: 'POST',

@@ -57,7 +57,8 @@ export const baseConfig = {
   spotify: { clientId: 'scid', clientSecret: 'ssec', market: 'DE', playlistPublic: false },
   tidal: { clientId: 'tcid', clientSecret: 'tsec', accessType: 'UNLISTED' },
   sync: {
-    mode: 'one-way', source: 'spotify', pairs: [], periodic: true, cron: '0 */6 * * *',
+    mode: 'one-way', source: 'spotify', pairs: [], likedSongs: false, likedSongsName: 'Spotify Liked Songs',
+    periodic: true, cron: '0 */6 * * *',
     onStart: true, tz: undefined, dryRun: false, matchRetryRuns: 10,
   },
   panel: { enabled: false, port: 8080, password: null, bypassAuth: false, bind: '127.0.0.1', appUrl: 'http://127.0.0.1:8080' },

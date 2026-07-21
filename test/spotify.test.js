@@ -185,3 +185,46 @@ test('removeTracks includes snapshot_id and chains it across chunks', async () =
   assert.equal(bodies[1].snapshot_id, 'snap-1', 'second chunk must chain the returned snapshot');
   assert.equal(bodies[0].items.length, 100);
 });
+
+test('liked songs: meta builds change token from total + newest added_at', async () => {
+  const { LIKED_SONGS_ID } = await import('../src/platforms/spotify.js');
+  const { adapter } = makeAdapter([
+    {
+      match: (u) => u.includes('/me/tracks') && u.includes('limit=1'),
+      reply: { status: 200, body: { total: 42, items: [{ added_at: '2026-07-20T10:00:00Z', track: spotifyTrack('n') }] } },
+    },
+  ]);
+  const meta = await adapter.getPlaylistMeta(LIKED_SONGS_ID);
+  assert.equal(meta.name, 'Spotify Liked Songs');
+  assert.equal(meta.changeToken, 'liked|42|2026-07-20T10:00:00Z');
+});
+
+test('liked songs: items page /me/tracks and return oldest-first', async () => {
+  const { LIKED_SONGS_ID } = await import('../src/platforms/spotify.js');
+  const page2 = 'https://api.spotify.com/v1/me/tracks?offset=50';
+  const { adapter } = makeAdapter([
+    {
+      match: (u) => u.includes('/me/tracks') && !u.includes('offset=50'),
+      reply: { status: 200, body: { next: page2, items: [{ added_at: 't2', track: spotifyTrack('newest') }] } },
+    },
+    {
+      match: (u) => u === page2,
+      reply: { status: 200, body: { next: null, items: [{ added_at: 't1', track: spotifyTrack('oldest') }] } },
+    },
+  ]);
+  const items = await adapter.getPlaylistItems(LIKED_SONGS_ID);
+  assert.deepEqual(items.map((t) => t.id), ['oldest', 'newest'], 'reversed so new likes append');
+});
+
+test('liked songs: 403 maps to an actionable reconnect error', async () => {
+  const { LIKED_SONGS_ID } = await import('../src/platforms/spotify.js');
+  const { adapter } = makeAdapter([
+    { match: (u) => u.includes('/me/tracks'), reply: { status: 403, body: { error: { status: 403, message: 'Insufficient client scope' } } } },
+  ]);
+  await assert.rejects(() => adapter.getPlaylistMeta(LIKED_SONGS_ID), /reconnect Spotify/);
+});
+
+test('authorize scope includes user-library-read', async () => {
+  const { SPOTIFY_SCOPES } = await import('../src/platforms/spotify.js');
+  assert.match(SPOTIFY_SCOPES, /user-library-read/);
+});

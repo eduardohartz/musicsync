@@ -3,7 +3,15 @@ import { computeWriteStrategy, chunk } from '../diff.js';
 
 const ACCOUNTS = 'https://accounts.spotify.com';
 const API = 'https://api.spotify.com/v1';
-export const SPOTIFY_SCOPES = 'playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private';
+export const SPOTIFY_SCOPES = 'playlist-read-private playlist-read-collaborative playlist-modify-public playlist-modify-private user-library-read';
+
+/**
+ * Sentinel playlist id for the user's Liked Songs (saved tracks). Not a real
+ * playlist on Spotify's side — the adapter maps it to /me/tracks, and the
+ * engine mirrors it into an ordinary TIDAL playlist. Cannot collide with
+ * real ids (Spotify playlist ids are 22-char base62).
+ */
+export const LIKED_SONGS_ID = 'spotify-liked-songs';
 
 // Development Mode apps (Feb 2026): playlist entry key renamed track -> item.
 // Request both in `fields` and read `item ?? track` while the migration settles.
@@ -77,6 +85,28 @@ export function createSpotifyAdapter({ config, tokens, logger, fetchImpl, sleep 
     }
   }
 
+  // Library endpoints need the user-library-read scope; tokens granted
+  // before Liked Songs support lack it, and Spotify answers 403.
+  async function likedRequest(url) {
+    try {
+      return await http.request(url, { auth: bearer });
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 403) {
+        throw new Error('Spotify denied library access — reconnect Spotify in the panel so musicsync can read Liked Songs');
+      }
+      throw err;
+    }
+  }
+
+  async function* likedPages(firstUrl) {
+    let url = firstUrl;
+    while (url) {
+      const page = await likedRequest(url);
+      yield page;
+      url = page?.next ?? null;
+    }
+  }
+
   async function getCurrentUser() {
     if (!cachedUserId) {
       const me = await http.request(`${API}/me`, { auth: bearer });
@@ -102,12 +132,33 @@ export function createSpotifyAdapter({ config, tokens, logger, fetchImpl, sleep 
     },
 
     async getPlaylistMeta(id) {
+      if (id === LIKED_SONGS_ID) {
+        // No snapshot_id for the library — total + newest added_at catches
+        // adds, removals, and same-total add-after-remove.
+        const res = await likedRequest(`${API}/me/tracks?limit=1&market=${config.spotify.market}`);
+        return {
+          id,
+          name: config.sync.likedSongsName,
+          changeToken: `liked|${res.total}|${res.items?.[0]?.added_at ?? ''}`,
+        };
+      }
       const p = await http.request(`${API}/playlists/${id}?fields=id,name,snapshot_id`, { auth: bearer });
       return { id: p.id, name: p.name, changeToken: p.snapshot_id };
     },
 
     async getPlaylistItems(id) {
       const out = [];
+      if (id === LIKED_SONGS_ID) {
+        for await (const page of likedPages(`${API}/me/tracks?limit=50&market=${config.spotify.market}`)) {
+          for (const entry of page.items ?? []) {
+            const track = toTrack(entry);
+            if (track) out.push(track);
+          }
+        }
+        // /me/tracks is newest-first; mirror oldest-first so a new like
+        // appends to the TIDAL playlist instead of forcing a full rebuild.
+        return out.reverse();
+      }
       const fields = encodeURIComponent(`next,items(${ITEM_FIELDS})`);
       for await (const page of pages(`${API}/playlists/${id}/items?limit=50&fields=${fields}`)) {
         for (const entry of page.items ?? []) {
