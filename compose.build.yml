@@ -1,0 +1,6 @@
+# Build-from-source override (needs the cloned repo):
+#   docker compose -f compose.yml -f compose.build.yml up -d --build
+services:
+  musicsync:
+    build: .
+    image: musicsync:local

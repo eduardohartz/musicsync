@@ -19,14 +19,31 @@ Runs headless in Docker with a small web panel: a first-launch **setup wizard** 
 - **Idempotent & resumable**: persisted match cache, change-token short-circuits, TIDAL `Idempotency-Key` mutations, atomic state writes
 - Unmatched tracks never fail a run — they're reported in the panel and retried as catalogs change
 
-## Quickstart
+## Install
+
+### Quickstart (prebuilt image)
+
+Grab the compose file — it points at the prebuilt `ghcr.io/eduardohartz/musicsync` image (amd64 + arm64) — set your panel password, and start it:
 
 ```bash
-git clone https://github.com/OWNER/musicsync && cd musicsync
-cp .env.example .env        # set WEB_PANEL_PASSWORD (one line — that's the only required config)
+mkdir musicsync && cd musicsync
+curl -LO https://raw.githubusercontent.com/eduardohartz/musicsync/main/compose.yml
+curl -Lo .env https://raw.githubusercontent.com/eduardohartz/musicsync/main/.env.example
+# edit .env: set WEB_PANEL_PASSWORD (one line — that's the only required config)
 mkdir -p config             # Linux hosts: sudo chown 1000:1000 config
 docker compose up -d
 ```
+
+### Building from source
+
+```bash
+git clone https://github.com/eduardohartz/musicsync && cd musicsync
+cp .env.example .env        # set WEB_PANEL_PASSWORD
+mkdir -p config             # Linux hosts: sudo chown 1000:1000 config
+docker compose -f compose.yml -f compose.build.yml up -d --build
+```
+
+### First run
 
 Open **http://127.0.0.1:8080** and follow the setup wizard:
 
@@ -39,8 +56,6 @@ Open **http://127.0.0.1:8080** and follow the setup wizard:
 Done. The dashboard shows every playlist with its `synced / total` count and anything that couldn't be matched.
 
 Running without Docker (Node ≥ 22.9): set `CONFIG_DIR=./config` in `.env`, then `npm ci && npm start` — the npm scripts load `.env` automatically.
-
-Prefer a prebuilt image? CI publishes `ghcr.io/OWNER/musicsync` (amd64 + arm64) on every release — swap `build: .` for `image: ghcr.io/OWNER/musicsync:latest` in `compose.yml`.
 
 ## How the two modes behave
 
