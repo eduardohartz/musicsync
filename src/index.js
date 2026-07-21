@@ -65,6 +65,28 @@ export function createRuntime({ env = process.env } = {}) {
   const tokens = createTokenStore(configDir, logger.child('tokens'));
   const state = createStateStore(configDir, logger.child('state'));
 
+  // Live per-pair progress for the panel: populated by the engine while a
+  // run is in flight, cleared when it ends (final results live in state).
+  let liveRun = null;
+  const progress = {
+    runStart(pairList) {
+      liveRun = {
+        startedAt: new Date().toISOString(),
+        pairs: pairList.map((p) => ({
+          primaryId: p.primaryId, name: p.name ?? null,
+          status: 'queued', matched: 0, total: null, unmatched: 0,
+        })),
+      };
+    },
+    update(primaryId, patch) {
+      const entry = liveRun?.pairs.find((p) => p.primaryId === primaryId);
+      if (entry) Object.assign(entry, patch);
+    },
+    runEnd() {
+      liveRun = null;
+    },
+  };
+
   let adapters;
   let engine;
   function build() {
@@ -74,7 +96,7 @@ export function createRuntime({ env = process.env } = {}) {
     };
     const overrides = readJson(path.join(configDir, 'overrides.json'), {}, logger.child('overrides'));
     const matcher = createMatcher({ adapters, state, overrides, logger, retryRuns: config.sync.matchRetryRuns });
-    engine = createSyncEngine({ config, adapters, state, matcher, logger });
+    engine = createSyncEngine({ config, adapters, state, matcher, logger, progress });
   }
   build();
 
@@ -281,6 +303,10 @@ export function createRuntime({ env = process.env } = {}) {
           tidal: { connected: connected('tidal'), ...adapters.tidal.describeAuth() },
         },
         configuredPairs: config.sync.pairs === 'all' ? 'all' : config.sync.pairs.length,
+        // Full configured selection (with wizard-captured names) so the
+        // dashboard can list every chosen playlist before its first sync.
+        configuredList: config.sync.pairs === 'all' ? null : config.sync.pairs,
+        liveSync: liveRun,
         pairs,
         unmatchedTotal: Object.keys(state.data.failures).length,
         runCount: state.data.runCount,
@@ -288,7 +314,23 @@ export function createRuntime({ env = process.env } = {}) {
     },
 
     unmatchedReport() {
-      return readJson(state.reportFile, { generatedAt: null, unmatched: [] });
+      // The report file is written at run end; the failure cache in state is
+      // current mid-run. Merge them so the panel list is live during a sync.
+      const file = readJson(state.reportFile, { generatedAt: null, unmatched: [] });
+      const seen = new Set(file.unmatched.map((u) => `${u.platform}:${u.trackId}`));
+      const live = Object.entries(state.data.failures)
+        .filter(([key]) => !seen.has(key))
+        .map(([key, f]) => {
+          const sep = key.indexOf(':');
+          return {
+            platform: key.slice(0, sep),
+            trackId: key.slice(sep + 1),
+            title: f.track?.title ?? null,
+            artists: f.track?.artists ?? [],
+            reason: f.reason,
+          };
+        });
+      return { ...file, unmatched: [...file.unmatched, ...live] };
     },
 
     async shutdown() {

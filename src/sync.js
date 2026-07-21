@@ -20,7 +20,11 @@ const tokenField = (platform) => `${platform}ChangeToken`;
  * A failure in one pair never stops the others; AuthRequiredError propagates
  * so the service can enter its re-auth state.
  */
-export function createSyncEngine({ config, adapters, state, matcher, logger }) {
+export function createSyncEngine({
+  config, adapters, state, matcher, logger,
+  // Optional live-progress sink (web panel); every hook is fire-and-forget.
+  progress = { runStart() {}, update() {}, runEnd() {} },
+}) {
   const log = logger.child('sync');
   const syncable = (t) => !t.isLocal && !t.isVideo;
 
@@ -70,6 +74,7 @@ export function createSyncEngine({ config, adapters, state, matcher, logger }) {
     const ps = pairState(primaryId, secondaryId);
 
     const sourceMeta = await source.getPlaylistMeta(primaryId);
+    progress.update(primaryId, { name: sourceMeta.name, status: 'syncing' });
 
     let created = false;
     if (!ps[playlistField(mirrorPlatform)]) {
@@ -99,6 +104,7 @@ export function createSyncEngine({ config, adapters, state, matcher, logger }) {
     }
 
     const sourceItems = (await source.getPlaylistItems(primaryId)).filter(syncable);
+    progress.update(primaryId, { total: sourceItems.length });
     const target = [];
     const unmatched = [];
     for (const track of sourceItems) {
@@ -116,6 +122,7 @@ export function createSyncEngine({ config, adapters, state, matcher, logger }) {
           reason: result.reason,
         });
       }
+      progress.update(primaryId, { matched: target.length, unmatched: unmatched.length });
     }
 
     const currentItems = created ? [] : await mirror.getPlaylistItems(mirrorId);
@@ -161,7 +168,7 @@ export function createSyncEngine({ config, adapters, state, matcher, logger }) {
    * one pair; a duplicated id in the baseline would later read as a removal
    * of a track the user still wants.
    */
-  async function matchNewTracks({ ids, byId, fromPlatform, presentOnTarget, covered, pairs, adds, unmatched, playlistName }) {
+  async function matchNewTracks({ ids, byId, fromPlatform, presentOnTarget, covered, pairs, adds, unmatched, playlistName, onTick }) {
     const toPlatform = other(fromPlatform);
     for (const id of ids) {
       if (covered[fromPlatform].has(id)) continue; // already in a pair formed from the other side
@@ -172,6 +179,7 @@ export function createSyncEngine({ config, adapters, state, matcher, logger }) {
           playlist: playlistName, platform: fromPlatform, trackId: id,
           title: track.title, artists: track.artists, isrc: track.isrc, reason: result.reason,
         });
+        onTick?.();
         continue;
       }
       if (covered[toPlatform].has(result.matchedId)) continue; // counterpart already paired
@@ -185,6 +193,7 @@ export function createSyncEngine({ config, adapters, state, matcher, logger }) {
       } else {
         adds.push(pair);
       }
+      onTick?.();
     }
   }
 
@@ -193,6 +202,7 @@ export function createSyncEngine({ config, adapters, state, matcher, logger }) {
     const ps = pairState(primaryId, secondaryId); // primary = spotify in two-way
 
     const spotifyMeta = await spotify.getPlaylistMeta(ps.spotifyPlaylistId);
+    progress.update(primaryId, { name: spotifyMeta.name, status: 'syncing' });
 
     if (!ps.tidalPlaylistId) {
       if (config.sync.dryRun) {
@@ -234,15 +244,25 @@ export function createSyncEngine({ config, adapters, state, matcher, logger }) {
       tidal: new Set(pairs.map((p) => p.tidal)),
     };
 
+    // Upper-bound total for live progress (covered-set dedupe may shrink it).
+    progress.update(primaryId, {
+      total: ops.keep.length + ops.newOnSpotify.length + ops.newOnTidal.length,
+      matched: pairs.length,
+    });
+    const tick = () => progress.update(primaryId, {
+      matched: pairs.length + addPairsToTidal.length + addPairsToSpotify.length,
+      unmatched: unmatched.length,
+    });
+
     await matchNewTracks({
       ids: ops.newOnSpotify, byId: spotifyById, fromPlatform: 'spotify',
       presentOnTarget: new Set(tidalIds), covered,
-      pairs, adds: addPairsToTidal, unmatched, playlistName: spotifyMeta.name,
+      pairs, adds: addPairsToTidal, unmatched, playlistName: spotifyMeta.name, onTick: tick,
     });
     await matchNewTracks({
       ids: ops.newOnTidal, byId: tidalById, fromPlatform: 'tidal',
       presentOnTarget: new Set(spotifyIds), covered,
-      pairs, adds: addPairsToSpotify, unmatched, playlistName: spotifyMeta.name,
+      pairs, adds: addPairsToSpotify, unmatched, playlistName: spotifyMeta.name, onTick: tick,
     });
 
     // First run has no baseline: merge only — everything is "new", nothing
@@ -335,19 +355,32 @@ export function createSyncEngine({ config, adapters, state, matcher, logger }) {
       state.data.runCount += 1;
       const syncPair = config.sync.mode === 'two-way' ? syncPairTwoWay : syncPairOneWay;
       const pairs = await resolvePairs();
+      // Seed the live view with every pair up front so the panel shows the
+      // whole queue immediately, not one playlist at a time.
+      progress.runStart(pairs.map((p) => ({
+        primaryId: p.primaryId,
+        name: p.name ?? state.data.pairs[p.primaryId]?.name ?? null,
+      })));
       const results = [];
       const unmatchedAll = [];
-      for (const pair of pairs) {
-        try {
-          results.push({ primaryId: pair.primaryId, ...(await syncPair(pair, unmatchedAll)) });
-        } catch (err) {
-          if (err instanceof AuthRequiredError) throw err;
-          log.error('pair failed', { primaryId: pair.primaryId, error: String(err) });
-          const ps = state.data.pairs[pair.primaryId];
-          if (ps) ps.lastResult = { status: 'failed', error: String(err), at: new Date().toISOString() };
-          results.push({ primaryId: pair.primaryId, status: 'failed', error: String(err) });
+      try {
+        for (const pair of pairs) {
+          try {
+            const result = await syncPair(pair, unmatchedAll);
+            progress.update(pair.primaryId, { status: result.status, matched: result.matched ?? 0, unmatched: result.unmatched ?? 0 });
+            results.push({ primaryId: pair.primaryId, ...result });
+          } catch (err) {
+            if (err instanceof AuthRequiredError) throw err;
+            log.error('pair failed', { primaryId: pair.primaryId, error: String(err) });
+            progress.update(pair.primaryId, { status: 'failed' });
+            const ps = state.data.pairs[pair.primaryId];
+            if (ps) ps.lastResult = { status: 'failed', error: String(err), at: new Date().toISOString() };
+            results.push({ primaryId: pair.primaryId, status: 'failed', error: String(err) });
+          }
+          state.save();
         }
-        state.save();
+      } finally {
+        progress.runEnd();
       }
       state.writeUnmatchedReport(unmatchedAll);
       const counts = results.reduce((acc, r) => ((acc[r.status] = (acc[r.status] ?? 0) + 1), acc), {});

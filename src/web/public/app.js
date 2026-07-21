@@ -242,53 +242,101 @@ function scheduleCard() {
   );
 }
 
+/**
+ * One dashboard entry per playlist, merged from three sources so every
+ * selected playlist is visible from the moment setup finishes:
+ *   configured selection (names from the wizard) <- state pairs (history)
+ *   <- live run overlay (queued / syncing with growing counts).
+ */
+function buildPairList(o) {
+  const map = new Map();
+  for (const p of o.configuredList ?? []) {
+    map.set(p.primaryId, { primaryId: p.primaryId, name: p.name ?? null });
+  }
+  for (const p of o.pairs) {
+    const existing = map.get(p.primaryId) ?? { primaryId: p.primaryId };
+    map.set(p.primaryId, { ...existing, ...p, name: p.name ?? existing.name ?? null });
+  }
+  for (const lp of o.liveSync?.pairs ?? []) {
+    const existing = map.get(lp.primaryId) ?? { primaryId: lp.primaryId };
+    map.set(lp.primaryId, { ...existing, name: lp.name ?? existing.name ?? null, live: lp });
+  }
+  return [...map.values()];
+}
+
+function progressCells(matched, total, unmatched, { done = true, status = 'synced' } = {}) {
+  const pct = !total ? (done ? 100 : 0) : Math.min(100, Math.round((matched / total) * 100));
+  const progress = h('div', { class: 'progresswrap' },
+    h('span', { class: 'small num' }, `${matched} / ${total ?? '\u2026'}`),
+    h('div', { class: 'bar', role: 'img', 'aria-label': `${matched} of ${total ?? 'unknown'} tracks synced` },
+      h('i', { class: done && pct === 100 ? 'full' : '', style: `width:${pct}%` })),
+  );
+  let chip;
+  if (!done) chip = h('span', { class: 'chip' }, logoMark(12, 'spin'), ' syncing');
+  else if (unmatched > 0) chip = h('span', { class: 'chip err num' }, `${unmatched} unmatched`);
+  else chip = h('span', { class: 'chip' }, status === 'dry-run' ? 'dry-run' : 'in sync');
+  return { progress, chip };
+}
+
 function pairRow(pair) {
+  const live = pair.live;
   const r = pair.lastResult;
   const dir = state.overview.mode === 'two-way' ? icon('i-both') : icon('i-arrow');
   let progress = h('span', { class: 'small muted' }, 'not synced yet');
   let chip = null;
-  if (r && r.status !== 'failed') {
-    const total = r.total || 0;
-    const pct = total === 0 ? 100 : Math.round((r.matched / total) * 100);
-    progress = h('div', { class: 'progresswrap' },
-      h('span', { class: 'small num' }, `${r.matched} / ${total}`),
-      h('div', { class: 'bar', role: 'img', 'aria-label': `${r.matched} of ${total} tracks synced` },
-        h('i', { class: pct === 100 ? 'full' : '', style: `width:${pct}%` })),
-    );
-    if (r.unmatched > 0) chip = h('span', { class: 'chip err num' }, `${r.unmatched} unmatched`);
-    else chip = h('span', { class: 'chip' }, r.status === 'dry-run' ? 'dry-run' : 'in sync');
+  let when = fmtRel(pair.lastSyncedAt);
+
+  if (live?.status === 'queued') {
+    chip = h('span', { class: 'chip' }, 'queued');
+    progress = h('span', { class: 'small muted' }, 'waiting\u2026');
+  } else if (live?.status === 'syncing') {
+    ({ progress, chip } = progressCells(live.matched, live.total, live.unmatched, { done: false }));
+    when = 'now';
+  } else if (live?.status === 'failed') {
+    chip = h('span', { class: 'chip err' }, 'failed');
+    progress = h('span', { class: 'small muted' }, 'see logs');
+  } else if (live && live.status !== 'skipped') {
+    // Finished earlier in the still-running batch — show its fresh result.
+    ({ progress, chip } = progressCells(live.matched, live.total, live.unmatched, { status: live.status }));
+    when = 'just now';
   } else if (r?.status === 'failed') {
     chip = h('span', { class: 'chip err' }, 'failed');
     progress = h('span', { class: 'small muted' }, 'see logs');
+  } else if (r) {
+    ({ progress, chip } = progressCells(r.matched, r.total || 0, r.unmatched, { status: r.status }));
   }
+
   return h('div', { class: 'row' },
     h('div', { class: 'title' }, icon('i-music'), h('span', { class: 'nm' }, pair.name ?? pair.primaryId), dir),
     progress,
-    h('div', {}, chip, h('div', { class: 'small muted', style: 'text-align:right' }, fmtRel(pair.lastSyncedAt))),
+    h('div', {}, chip, h('div', { class: 'small muted', style: 'text-align:right' }, when)),
   );
 }
 
-async function unmatchedSection() {
+function unmatchedSection() {
   const wrap = h('div', { class: 'card' });
   const body = h('div', {}, h('p', { class: 'small muted' }, 'Loading…'));
-  const details = h('details', { class: 'unmatched', open: state.unmatchedOpen, ontoggle: async () => {
-    state.unmatchedOpen = details.open; // survive poll re-renders
-    if (!details.open) return;
+  async function load() {
     try {
       const report = await api('/api/unmatched');
-      body.replaceChildren(
-        report.unmatched.length === 0
-          ? h('p', { class: 'small muted' }, 'Nothing here — every track found a home.')
-          : report.unmatched.map((u) => h('div', { class: 'unmatched-item' },
-            h('div', {},
-              h('div', {}, u.title ?? u.trackId),
-              h('div', { class: 'small muted' }, (u.artists ?? []).join(', '), u.playlist ? ` · ${u.playlist}` : '')),
-            h('span', { class: 'chip' }, u.reason ?? 'unmatched'),
-          )),
-      );
+      const rows = report.unmatched.length === 0
+        ? [h('p', { class: 'small muted' }, 'Nothing here — every track found a home.')]
+        : report.unmatched.map((u) => h('div', { class: 'unmatched-item' },
+          h('div', {},
+            h('div', {}, u.title ?? u.trackId),
+            h('div', { class: 'small muted' }, (u.artists ?? []).join(', '), u.playlist ? ` · ${u.playlist}` : '')),
+          h('span', { class: 'chip' }, u.reason ?? 'unmatched'),
+        ));
+      body.replaceChildren(...rows);
     } catch (err) { body.replaceChildren(h('p', { class: 'small muted' }, err.message)); }
+  }
+  const details = h('details', { class: 'unmatched', open: state.unmatchedOpen, ontoggle: () => {
+    state.unmatchedOpen = details.open; // survive poll re-renders
+    if (details.open) load();
   } },
   h('summary', {}, `Unmatched tracks (${state.overview.unmatchedTotal})`), body);
+  // Rebuilt on every poll render, so an open list refreshes live mid-sync.
+  if (state.unmatchedOpen) load();
   wrap.append(details);
   return wrap;
 }
@@ -303,7 +351,7 @@ function dashboardView() {
   if (o.lastRunError) {
     banners.push(h('div', { class: 'banner err' }, icon('i-alert'), h('span', {}, `Last run failed: ${o.lastRunError}`)));
   }
-  const pairs = o.pairs;
+  const pairs = buildPairList(o);
   const container = h('div', { class: 'shell' },
     topbar('dashboard'),
     ...banners,
@@ -316,11 +364,13 @@ function dashboardView() {
     h('div', { class: 'card' },
       pairs.length === 0
         ? h('p', { class: 'muted', style: 'padding:8px 0' },
-          'No syncs have run yet. Hit “Sync now” to run the first one.')
+          o.configuredPairs === 'all'
+            ? 'Playlists appear here when the first sync starts.'
+            : 'No playlists selected yet.')
         : h('div', { class: 'rows' }, pairs.map(pairRow)),
     ),
+    unmatchedSection(),
   );
-  unmatchedSection().then((el) => container.append(el));
   return container;
 }
 

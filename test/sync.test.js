@@ -451,3 +451,64 @@ test('two-way: spotify removals carry the snapshot guard from the pre-read meta'
   assert.equal(removeArgs.length, 1);
   assert.deepEqual(removeArgs[0].opts, { snapshotId: 'snap-42' });
 });
+
+test('progress: all pairs seeded as queued up front, live counts tick, statuses settle', async () => {
+  const events = [];
+  const progress = {
+    runStart: (pairs) => events.push(['runStart', pairs.map((p) => p.primaryId)]),
+    update: (id, patch) => events.push(['update', id, { ...patch }]),
+    runEnd: () => events.push(['runEnd']),
+  };
+  const { config, state, adapters } = makeWorld({
+    pairs: [
+      { primaryId: 'm1', secondaryId: null, name: 'First' },
+      { primaryId: 'm2', secondaryId: null, name: 'Second' },
+    ],
+    spotifyLists: {
+      m1: { name: 'First', changeToken: 'v1', items: [mTrack('a'), mTrack('b')] },
+      m2: { name: 'Second', changeToken: 'v1', items: [mTrack('c')] },
+    },
+  });
+  const engine = createSyncEngine({
+    config, adapters, state,
+    matcher: { matchTrack: async (t) => ({ matchedId: `s-${t.id}`, matchedBy: 'isrc' }) },
+    logger: silentLogger, progress,
+  });
+  await engine.runSync();
+
+  assert.deepEqual(events[0], ['runStart', ['m1', 'm2']]);
+  const m1Sync = events.find((e) => e[0] === 'update' && e[1] === 'm1' && e[2].status === 'syncing');
+  assert.ok(m1Sync, 'm1 must be marked syncing');
+  const m1Total = events.find((e) => e[0] === 'update' && e[1] === 'm1' && e[2].total === 2);
+  assert.ok(m1Total, 'm1 total published after item fetch');
+  const m1Ticks = events.filter((e) => e[0] === 'update' && e[1] === 'm1' && e[2].matched !== undefined);
+  assert.ok(m1Ticks.some((e) => e[2].matched === 1) && m1Ticks.some((e) => e[2].matched === 2),
+    'per-track ticks must show the count growing');
+  const m1Done = events.find((e) => e[0] === 'update' && e[1] === 'm1' && e[2].status === 'synced');
+  assert.ok(m1Done, 'm1 settles as synced');
+  // m2 must not start before m1 finishes (queued while m1 runs)
+  const m1DoneIdx = events.indexOf(m1Done);
+  const m2SyncIdx = events.findIndex((e) => e[0] === 'update' && e[1] === 'm2' && e[2].status === 'syncing');
+  assert.ok(m2SyncIdx > m1DoneIdx, 'm2 stays queued until m1 completes');
+  assert.deepEqual(events.at(-1), ['runEnd']);
+});
+
+test('progress: failed pair reported and runEnd fires even on engine errors', async () => {
+  const events = [];
+  const progress = {
+    runStart: () => {},
+    update: (id, patch) => events.push([id, patch.status]),
+    runEnd: () => events.push(['end']),
+  };
+  const { config, state, adapters } = makeWorld({
+    pairs: [{ primaryId: 'boom', secondaryId: null }],
+    spotifyLists: {}, // missing playlist -> getPlaylistMeta throws
+  });
+  const engine = createSyncEngine({
+    config, adapters, state,
+    matcher: {}, logger: silentLogger, progress,
+  });
+  await engine.runSync();
+  assert.ok(events.some(([id, s]) => id === 'boom' && s === 'failed'));
+  assert.deepEqual(events.at(-1), ['end']);
+});
