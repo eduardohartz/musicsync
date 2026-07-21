@@ -218,13 +218,20 @@ function connCard(platform) {
   if (!conn.connected) {
     bits.push(h('p', { class: 'small muted' }, 'Not connected'));
     bits.push(h('a', { class: 'btn', href: `/auth/${platform}` }, 'Connect'));
-  } else if (platform === 'spotify' && conn.daysLeft !== null && conn.daysLeft !== undefined) {
-    const cls = conn.warn ? 'small' : 'small muted';
-    bits.push(h('p', { class: cls, style: conn.warn ? 'color:var(--warn)' : '' },
-      `Authorization renews in ${conn.daysLeft} days`, conn.warn ? ' — reconnect soon' : ''));
-    if (conn.warn) bits.push(h('a', { class: 'btn', href: `/auth/${platform}` }, 'Reconnect'));
   } else {
-    bits.push(h('p', { class: 'small muted' }, 'Connected'));
+    if (platform === 'spotify' && conn.daysLeft !== null && conn.daysLeft !== undefined) {
+      bits.push(h('p', { class: conn.warn ? 'small' : 'small muted', style: conn.warn ? 'color:var(--warn)' : '' },
+        `Authorization renews in ${conn.daysLeft} days`, conn.warn ? ' — reconnect soon' : ''));
+    } else {
+      bits.push(h('p', { class: 'small muted' }, 'Connected'));
+    }
+    // Always offer re-auth: fixes expired/revoked tokens and grants newly
+    // required permissions (e.g. Liked Songs needs the library scope).
+    bits.push(h('a', {
+      class: conn.warn ? 'btn' : 'btn ghost',
+      href: `/auth/${platform}`,
+      title: 'Re-authorize this account — use after permission changes (like enabling Liked Songs) or when access expires',
+    }, icon('i-refresh'), 'Reconnect'));
   }
   return h('div', { class: 'card' },
     h('div', { class: 'conn' }, connectionDot(conn), h('span', { class: 'name' }, PLATFORM_LABEL[platform])),
