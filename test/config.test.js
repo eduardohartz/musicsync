@@ -124,3 +124,15 @@ test('PANEL_BIND defaults to loopback', () => {
   assert.equal(loadConfig(VALID_ENV).panel.bind, '127.0.0.1');
   assert.equal(loadConfig({ ...VALID_ENV, PANEL_BIND: '0.0.0.0' }).panel.bind, '0.0.0.0');
 });
+
+test('APP_URL overrides the redirect base and defaults to loopback:PORT', () => {
+  assert.equal(loadConfig(VALID_ENV).panel.appUrl, 'http://127.0.0.1:8080');
+  assert.equal(loadConfig({ ...VALID_ENV, PORT: '9001' }).panel.appUrl, 'http://127.0.0.1:9001');
+  assert.equal(
+    loadConfig({ ...VALID_ENV, APP_URL: 'https://musicsync.example.com/' }).panel.appUrl,
+    'https://musicsync.example.com',
+    'trailing slash stripped',
+  );
+  assert.throws(() => loadConfig({ ...VALID_ENV, APP_URL: 'not a url' }), ConfigError);
+  assert.throws(() => loadConfig({ ...VALID_ENV, APP_URL: 'ftp://x.example' }), ConfigError);
+});

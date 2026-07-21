@@ -88,7 +88,9 @@ export function createWebServer({ runtime, logger }) {
   });
 
   // ---- OAuth (primary flow) ------------------------------------------------
-  const redirectUri = (platform) => `http://127.0.0.1:${cfg().panel.port}/callback/${platform}`;
+  // APP_URL-aware: behind a reverse proxy the registered redirect URIs must
+  // carry the public origin, not the container loopback.
+  const redirectUri = (platform) => `${cfg().panel.appUrl}/callback/${platform}`;
 
   app.get('/auth/:platform', requireAuth, (req, res) => {
     const { platform } = req.params;

@@ -111,6 +111,21 @@ export function loadConfig(env = process.env, settings = {}) {
   const bypassAuth = parseBool(env.WEB_PANEL_BYPASS_AUTH, 'WEB_PANEL_BYPASS_AUTH', problems, false);
   const password = env.WEB_PANEL_PASSWORD || null;
 
+  // Public base URL of the panel — drives the OAuth redirect URIs. Defaults
+  // to the loopback address; set it when running behind a reverse proxy.
+  // Note: Spotify only accepts non-loopback redirect URIs over HTTPS.
+  let appUrl = `http://127.0.0.1:${panelPort}`;
+  if (env.APP_URL) {
+    const raw = String(env.APP_URL).replace(/\/+$/, '');
+    try {
+      const parsed = new URL(raw);
+      if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('scheme');
+      appUrl = raw;
+    } catch {
+      problems.push(`APP_URL must be a valid http(s) URL (got "${env.APP_URL}")`);
+    }
+  }
+
   const config = {
     spotify: {
       clientId: spotifyClientId,
@@ -140,6 +155,7 @@ export function loadConfig(env = process.env, settings = {}) {
       password,
       bypassAuth,
       bind: env.PANEL_BIND ?? '127.0.0.1',
+      appUrl,
     },
     configDir: env.CONFIG_DIR ?? '/config',
     logLevel,

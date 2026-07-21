@@ -60,7 +60,7 @@ export const baseConfig = {
     mode: 'one-way', source: 'spotify', pairs: [], periodic: true, cron: '0 */6 * * *',
     onStart: true, tz: undefined, dryRun: false, matchRetryRuns: 10,
   },
-  panel: { enabled: false, port: 8080, password: null, bypassAuth: false, bind: '127.0.0.1' },
+  panel: { enabled: false, port: 8080, password: null, bypassAuth: false, bind: '127.0.0.1', appUrl: 'http://127.0.0.1:8080' },
   configDir: '/tmp/unused',
   logLevel: 'error',
   incomplete: [],

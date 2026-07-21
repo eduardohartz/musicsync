@@ -383,7 +383,7 @@ export async function main() {
 
   if (!runtime.ready()) {
     runtime.writePhaseHealth();
-    log.info(`setup needed — open the web panel at http://127.0.0.1:${config.panel.port} to finish configuration`);
+    log.info(`setup needed — open the web panel at ${config.panel.appUrl} to finish configuration`);
   } else {
     runtime.scheduleCron();
     runtime.writePhaseHealth();

@@ -161,3 +161,18 @@ test('playlists endpoint proxies the adapter', async () => {
   const res = await fetch(`${base}/api/playlists/spotify`);
   assert.deepEqual(await res.json(), { playlists: [{ id: 'p1', name: 'One', count: 3 }] });
 });
+
+test('redirect URIs follow panel.appUrl (reverse-proxy support)', async () => {
+  const runtime = stubRuntime({ bypass: true });
+  runtime.config().panel.appUrl = 'https://musicsync.example.com';
+  const { server, base } = await startServer(runtime);
+  servers.push(server);
+  const authRes = await fetch(`${base}/auth/spotify`, { redirect: 'manual' });
+  const location = new URL(authRes.headers.get('location'));
+  assert.equal(
+    decodeURIComponent(location.searchParams.get('redirect_uri')),
+    'https://musicsync.example.com/callback/spotify',
+  );
+  const settings = await (await fetch(`${base}/api/settings`)).json();
+  assert.equal(settings.redirectUris.tidal, 'https://musicsync.example.com/callback/tidal');
+});

@@ -28,6 +28,7 @@ mkdir musicsync && cd musicsync
 curl -LO https://raw.githubusercontent.com/eduardohartz/musicsync/main/compose.yml
 curl -Lo .env https://raw.githubusercontent.com/eduardohartz/musicsync/main/.env.example
 # edit .env: set WEB_PANEL_PASSWORD (one line — that's the only required config)
+chown 1000 config
 docker compose up -d
 ```
 
@@ -76,6 +77,7 @@ Everything is optional except the panel credential — setup happens in the web 
 | `WEB_PANEL_PASSWORD` | — | Enables the panel with password login |
 | `WEB_PANEL_BYPASS_AUTH` | `false` | Enables the panel **without authentication** — trusted networks only |
 | `PORT` | `8080` | Panel port (OAuth redirect URIs use it) |
+| `APP_URL` | `http://127.0.0.1:$PORT` | Public base URL of the panel — the OAuth redirect URIs become `$APP_URL/callback/…`. Set when behind a reverse proxy; Spotify requires HTTPS for anything other than `127.0.0.1` |
 | `SPOTIFY_CLIENT_ID/SECRET`, `TIDAL_CLIENT_ID/SECRET` | — | Platform app credentials (or enter in the wizard) |
 | `SYNC_MODE` | `one-way` | `one-way` \| `two-way` |
 | `SYNC_SOURCE` | — | One-way only: `spotify` \| `tidal` — the source of truth |
@@ -96,7 +98,7 @@ Everything is optional except the panel credential — setup happens in the web 
 - **Two-way sync is set-based**: ordering isn't reconciled across platforms, and a track removed on one side while untouched on the other is treated as a removal.
 - **Spotify local files** can't sync (no ISRC, not addable via API); TIDAL **videos** are left in place but never propagated.
 - Initial syncs of large libraries are deliberately slow (~1 request/second against TIDAL; Spotify batch endpoints no longer exist).
-- The panel binds to the host loopback by default. For remote access, use an SSH tunnel or put an authenticating reverse proxy (HTTPS) in front.
+- The panel binds to the host loopback by default. For remote access, use an SSH tunnel, or put an HTTPS reverse proxy in front and set `APP_URL` to its public URL (the wizard's redirect URIs follow it).
 
 ## Development
 
